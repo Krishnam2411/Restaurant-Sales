@@ -1,0 +1,32 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "enables the default permissions",
+  "windows": [
+    "main",
+    "receipt-preview"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-create",
+    "core:webview:allow-create-webview-window",
+    "dialog:default",
+    "fs:allow-read-file",
+    "fs:allow-write-file",
+    "fs:allow-write-text-file",
+    {
+      "identifier": "fs:scope",
+      "allow": [
+        "$DOCUMENT/aalsi chatore/Ledgers",
+        "$DOCUMENT/aalsi chatore/Ledgers/**",
+        "$APPDATA/com.aalsi.chatore.sales",
+        "$APPDATA/com.aalsi.chatore.sales/**"
+      ]
+    },
+    "sql:allow-load",
+    "sql:allow-execute",
+    "sql:allow-select",
+    "sql:allow-close",
+    "updater:default"
+  ]
+}

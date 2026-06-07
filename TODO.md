@@ -1,0 +1,21 @@
+# TODO
+
+- [x] Remove unused reference asset folders.
+- [x] Rewrite PRD around the actual restaurant sales tracker product.
+- [x] Rewrite README in plain language without project dumps.
+- [x] Add Manage Orders.
+- [x] UI enhancements.
+- [x] Add hybrid payment option with Cash + UPI split.
+- [x] Add order channels: Dine-in and Handover.
+- [x] Add discount option.
+- [x] Manual option to add Zomato and Swiggy orders.
+- [x] Bill Printing option and Kitchen ticket in hindi.
+- [x] Enhance UI/UX in POS and Exported assets.
+- [x] Keep generalised font size overall
+- [x] Improve export pdf and csv ui
+- [x] Improve print preview
+- [ ] Add Unit Tests
+- [ ] Test the full sales, menu, and order flow.
+- [ ] Test CI/CD release and updater flow.
+- [ ] Add Print external window action toast
+- [ ] Add filter in ledger based on Payment Type, Amount Range, Time (Morning, Afternoon, Evening)
