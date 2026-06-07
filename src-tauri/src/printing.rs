@@ -332,7 +332,7 @@ fn silent_print(html_path: &PathBuf, printer_name: &str) -> Result<(), String> {
     // SAFETY: ShellExecuteW is a standard Win32 call. All pointers are valid for the duration of the call.
     let result = unsafe {
         windows_sys::Win32::UI::Shell::ShellExecuteW(
-            std::ptr::null_mut(),
+            0isize,
             verb.as_ptr(),
             path_wide.as_ptr(),
             if printer_name.is_empty() {
