@@ -137,6 +137,7 @@ textarea {
   top: 0;
   height: 100svh;
   overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .sidebar.collapsed {
