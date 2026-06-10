@@ -113,9 +113,13 @@ pub fn get_default_printer() -> String {
 
 #[cfg(target_os = "windows")]
 fn enumerate_printers() -> Vec<PrinterInfo> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
     // Use wmic to list printers — available on all modern Windows versions
     // Output format (CSV): Caption,Default,PrinterStatus,...
     let output = std::process::Command::new("wmic")
+        .creation_flags(CREATE_NO_WINDOW)
         .args(["printer", "get", "Name,Default", "/format:csv"])
         .output();
 

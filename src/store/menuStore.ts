@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { MenuItem } from '../types';
+import type { Addon, MenuItem } from '../types';
 import * as svc from '../services/menuService';
 
 interface MenuState {
@@ -12,7 +12,11 @@ interface MenuState {
   addCategory: (name: string) => void;
   renameCategory: (oldName: string, newName: string) => Promise<void>;
   removeCategory: (name: string) => void;
+  addAddon: (itemId: string, data: Omit<Addon, 'id'>) => void;
+  updateAddon: (itemId: string, addonId: string, data: Partial<Omit<Addon, 'id'>>) => void;
+  removeAddon: (itemId: string, addonId: string) => void;
 }
+
 
 export const useMenuStore = create<MenuState>((set) => ({
   items: [],
@@ -59,6 +63,27 @@ export const useMenuStore = create<MenuState>((set) => ({
   removeCategory: (name) => {
     void (async () => {
       await svc.removeCategory(name);
+      const next = await svc.getMenuData();
+      set({ items: next.items, categories: next.categories });
+    })();
+  },
+  addAddon: (itemId, data) => {
+    void (async () => {
+      await svc.addAddonToItem(itemId, data);
+      const next = await svc.getMenuData();
+      set({ items: next.items, categories: next.categories });
+    })();
+  },
+  updateAddon: (itemId, addonId, data) => {
+    void (async () => {
+      await svc.updateAddonOnItem(itemId, addonId, data);
+      const next = await svc.getMenuData();
+      set({ items: next.items, categories: next.categories });
+    })();
+  },
+  removeAddon: (itemId, addonId) => {
+    void (async () => {
+      await svc.removeAddonFromItem(itemId, addonId);
       const next = await svc.getMenuData();
       set({ items: next.items, categories: next.categories });
     })();

@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
-import type { Order, OrderItem, OrderType } from '../../types';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { Order, OrderItem, OrderItemAddon, OrderType, ExtraCharge } from '../../types';
 import { useMenuStore } from '../../store/menuStore';
 import { useOrderStore } from '../../store/orderStore';
 import { formatCurrency } from '../../utils/currencyUtils';
@@ -15,8 +15,13 @@ interface Props {
 
 const ORDER_TYPES: OrderType[] = ['Dine', 'Takeaway', 'Local Delivery', 'Zomato', 'Swiggy'];
 
+function itemLineTotal(item: OrderItem): number {
+  const addonTotal = (item.addons ?? []).reduce((s, a) => s + (a.qty ?? 1) * a.price, 0);
+  return item.qty * item.unitPrice + addonTotal;
+}
+
 function orderTotal(items: OrderItem[]): number {
-  return items.reduce((sum, item) => sum + item.qty * item.unitPrice, 0);
+  return items.reduce((sum, item) => sum + itemLineTotal(item), 0);
 }
 
 export default function AddOrderForm({ onClose, order, onSaved }: Props) {
@@ -31,6 +36,13 @@ export default function AddOrderForm({ onClose, order, onSaved }: Props) {
   const [activeCat, setActiveCat] = useState('All');
   const [searchTerm, setSearchTerm] = useState('');
   const [items, setItems] = useState<OrderItem[]>([]);
+  const [extraCharges, setExtraCharges] = useState<ExtraCharge[]>(order?.extraCharges ?? []);
+  const [newChargeLabel, setNewChargeLabel] = useState('');
+  const [newChargeAmount, setNewChargeAmount] = useState('');
+
+  // which bill-line index has its addon picker open
+  const [addonPickerForIndex, setAddonPickerForIndex] = useState<number | null>(null);
+  const pickerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!order) return;
@@ -38,15 +50,30 @@ export default function AddOrderForm({ onClose, order, onSaved }: Props) {
     setCustomerName(order.customerName ?? '');
     setNote(order.note ?? '');
     setDiscount(order.discount != null ? String(order.discount) : '');
-    setItems(order.items);
+    setExtraCharges(order.extraCharges ?? []);
+    // Ensure legacy addons without qty get qty: 1
+    setItems(order.items.map(item => ({
+      ...item,
+      addons: item.addons?.map(a => ({ ...a, qty: a.qty ?? 1 })),
+    })));
     setActiveCat('All');
     setSearchTerm('');
+    setAddonPickerForIndex(null);
   }, [order]);
 
-  const categories = useMemo(
-    () => ['All', ...menuCategories],
-    [menuCategories]
-  );
+  // Close picker when clicking outside
+  useEffect(() => {
+    if (addonPickerForIndex === null) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) {
+        setAddonPickerForIndex(null);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [addonPickerForIndex]);
+
+  const categories = useMemo(() => ['All', ...menuCategories], [menuCategories]);
 
   const visibleItems = useMemo(() => {
     const activeItems = menuItems.filter(item => item.isActive !== false);
@@ -61,17 +88,22 @@ export default function AddOrderForm({ onClose, order, onSaved }: Props) {
   const total = useMemo(() => orderTotal(items), [items]);
   const finalTotal = useMemo(() => {
     const disc = discount ? parseFloat(discount) || 0 : 0;
-    return Math.max(0, total - disc);
-  }, [total, discount]);
+    const chargesSum = extraCharges.reduce((s, c) => s + c.amount, 0);
+    return Math.max(0, total + chargesSum - disc);
+  }, [total, discount, extraCharges]);
 
-  const addMenuItem = (id: string) => {
-    const item = menuItems.find(menuItem => menuItem.id === id);
+  // ── Cart helpers ─────────────────────────────────────
+
+  const commitMenuItem = (id: string) => {
+    const item = menuItems.find(mi => mi.id === id);
     if (!item) return;
     setItems(prev => {
       const next = [...prev];
-      const idx = next.findIndex(existing => existing.menuItemId === id);
-      if (idx >= 0) {
-        next[idx] = { ...next[idx], qty: next[idx].qty + 1 };
+      const existingIdx = next.findIndex(
+        e => e.menuItemId === id && (e.addons ?? []).length === 0
+      );
+      if (existingIdx >= 0) {
+        next[existingIdx] = { ...next[existingIdx], qty: next[existingIdx].qty + 1 };
       } else {
         next.push({
           menuItemId: id,
@@ -93,9 +125,38 @@ export default function AddOrderForm({ onClose, order, onSaved }: Props) {
       const qty = current.qty + delta;
       if (qty <= 0) {
         next.splice(index, 1);
+        setAddonPickerForIndex(null);
       } else {
         next[index] = { ...current, qty };
       }
+      return next;
+    });
+  };
+
+  // Add a new add-on to a bill-line (qty starts at 1)
+  const addAddonToLine = (lineIndex: number, addon: Omit<OrderItemAddon, 'qty'>) => {
+    setItems(prev => {
+      const next = [...prev];
+      const line = next[lineIndex];
+      if (!line) return prev;
+      const existing = line.addons ?? [];
+      if (existing.some(a => a.addonId === addon.addonId)) return prev; // already added
+      next[lineIndex] = { ...line, addons: [...existing, { ...addon, qty: 1 }] };
+      return next;
+    });
+    setAddonPickerForIndex(null);
+  };
+
+  // Adjust qty of an existing add-on; remove when qty hits 0
+  const adjustAddonQty = (lineIndex: number, addonId: string, delta: number) => {
+    setItems(prev => {
+      const next = [...prev];
+      const line = next[lineIndex];
+      if (!line) return prev;
+      const addons = (line.addons ?? [])
+        .map(a => a.addonId === addonId ? { ...a, qty: (a.qty ?? 1) + delta } : a)
+        .filter(a => a.qty > 0);
+      next[lineIndex] = { ...line, addons: addons.length > 0 ? addons : undefined };
       return next;
     });
   };
@@ -104,9 +165,14 @@ export default function AddOrderForm({ onClose, order, onSaved }: Props) {
     setOrderType('Dine');
     setCustomerName('');
     setNote('');
+    setDiscount('');
+    setExtraCharges([]);
+    setNewChargeLabel('');
+    setNewChargeAmount('');
     setActiveCat('All');
     setSearchTerm('');
     setItems([]);
+    setAddonPickerForIndex(null);
   };
 
   const handleSubmit = () => {
@@ -128,6 +194,7 @@ export default function AddOrderForm({ onClose, order, onSaved }: Props) {
           cashAmount: order.cashAmount,
           upiAmount: order.upiAmount,
           completedAt: order.completedAt,
+          extraCharges: extraCharges.length > 0 ? extraCharges : undefined,
         });
       } else {
         await createOrder({
@@ -138,6 +205,7 @@ export default function AddOrderForm({ onClose, order, onSaved }: Props) {
           discount: discount ? parseFloat(discount) || 0 : undefined,
           note: note.trim() || undefined,
           status: 'Open',
+          extraCharges: extraCharges.length > 0 ? extraCharges : undefined,
         });
       }
       await load();
@@ -151,6 +219,7 @@ export default function AddOrderForm({ onClose, order, onSaved }: Props) {
   return (
     <div className="modal-body record-order-body">
       <div className="record-order-layout">
+        {/* ── Left: category filter ── */}
         <aside className="record-order-sidebar">
           <div className="record-order-search">
             <Icon name="search" size={16} />
@@ -162,7 +231,6 @@ export default function AddOrderForm({ onClose, order, onSaved }: Props) {
               onChange={e => setSearchTerm(e.target.value)}
             />
           </div>
-
           <div className="record-order-categories">
             {categories.map(category => (
               <button
@@ -177,26 +245,24 @@ export default function AddOrderForm({ onClose, order, onSaved }: Props) {
           </div>
         </aside>
 
+        {/* ── Centre: menu grid ── */}
         <section className="record-order-menu">
           <div className="record-order-menu-header">
-            <div>
-              <h2>Available Items</h2>
-            </div>
+            <div><h2>Available Items</h2></div>
             <span className="card-badge">{menuItems.length} items</span>
           </div>
-
           <div className="menu-item-grid record-order-grid">
             {visibleItems.length === 0 ? (
               <div className="menu-empty">No menu items match your filter.</div>
-            ) : (
-              visibleItems.map(item => {
-                const qty = items.find(orderItem => orderItem.menuItemId === item.id)?.qty ?? 0;
-                return (
+            ) : visibleItems.map(item => {
+              const cartQty = items.filter(oi => oi.menuItemId === item.id).reduce((s, oi) => s + oi.qty, 0);
+              const hasAddons = (item.addons ?? []).length > 0;
+              return (
+                <div key={item.id} className="menu-item-btn-wrap">
                   <button
-                    key={item.id}
                     type="button"
-                    className={`menu-item-btn${qty > 0 ? ' selected' : ''}`}
-                    onClick={() => addMenuItem(item.id)}
+                    className={`menu-item-btn${cartQty > 0 ? ' selected' : ''}`}
+                    onClick={() => commitMenuItem(item.id)}
                   >
                     <span className="menu-item-btn-thumb" aria-hidden="true">
                       {item.image ? (
@@ -212,20 +278,20 @@ export default function AddOrderForm({ onClose, order, onSaved }: Props) {
                         <span className="menu-item-btn-name">{item.name}</span>
                         <span className="menu-item-btn-price">{formatCurrency(item.price)}</span>
                       </span>
+                      {hasAddons && <span className="menu-item-btn-addons-hint">+ add-ons available</span>}
                     </span>
-                    {qty > 0 && <span className="menu-item-btn-qty">x{qty}</span>}
+                    {cartQty > 0 && <span className="menu-item-btn-qty">x{cartQty}</span>}
                   </button>
-                );
-              })
-            )}
+                </div>
+              );
+            })}
           </div>
         </section>
 
+        {/* ── Right: order summary ── */}
         <aside className="record-order-summary">
           <div className="panel-header">
-            <div>
-              <h2>Order Summary</h2>
-            </div>
+            <div><h2>Order Summary</h2></div>
           </div>
 
           <div className="form-group">
@@ -247,22 +313,107 @@ export default function AddOrderForm({ onClose, order, onSaved }: Props) {
           <div className="bill-lines">
             {items.length === 0 ? (
               <div className="orders-empty">No items selected yet.</div>
-            ) : items.map((item, index) => (
-              <div key={`${item.name}-${index}`} className="bill-line">
-                <div>
-                  <div className="bill-line-name">{item.name}</div>
-                  <div className="bill-line-meta">{formatCurrency(item.unitPrice)} each</div>
+            ) : items.map((item, index) => {
+              const menuItem = item.menuItemId ? menuItems.find(mi => mi.id === item.menuItemId) : undefined;
+              const availableAddons = menuItem?.addons ?? [];
+              const addedAddonIds = new Set((item.addons ?? []).map(a => a.addonId));
+              // Add-ons that haven't been added to this line yet
+              const remainingAddons = availableAddons.filter(a => !addedAddonIds.has(a.id));
+              const pickerOpen = addonPickerForIndex === index;
+
+              return (
+                <div key={`${item.menuItemId ?? item.name}-${index}`} className="bill-line bill-line-with-addons">
+                  {/* Item name + addons section */}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div className="bill-line-name">{item.name}</div>
+                    <div className="bill-line-meta">{formatCurrency(item.unitPrice)} each</div>
+
+                    {/* Add-on child rows with qty controls */}
+                    {(item.addons ?? []).map((addon) => (
+                      <div key={addon.addonId} className="bill-line-addon bill-line-addon-interactive">
+                        <span className="bill-line-addon-arrow">↳</span>
+                        <span className="bill-line-addon-name">{addon.name}</span>
+                        {/* Qty controls for add-on */}
+                        <div className="addon-qty-controls">
+                          <button
+                            type="button"
+                            className="addon-qty-btn"
+                            onClick={() => adjustAddonQty(index, addon.addonId, -1)}
+                            title="Decrease"
+                          >
+                            −
+                          </button>
+                          <span className="addon-qty-value">{addon.qty ?? 1}</span>
+                          <button
+                            type="button"
+                            className="addon-qty-btn"
+                            onClick={() => adjustAddonQty(index, addon.addonId, 1)}
+                            title="Increase"
+                          >
+                            ＋
+                          </button>
+                        </div>
+                        {addon.price > 0
+                          ? <span className="bill-line-addon-price">+{formatCurrency(addon.price * (addon.qty ?? 1))}</span>
+                          : <span className="bill-line-addon-price bill-line-addon-free">free</span>
+                        }
+                      </div>
+                    ))}
+
+                    {/* "+ Add add-on" — only shown when there are still add-ons left to add */}
+                    {remainingAddons.length > 0 && (
+                      <div style={{ position: 'relative' }}>
+                        <button
+                          type="button"
+                          className="bill-addon-trigger"
+                          onClick={() => setAddonPickerForIndex(pickerOpen ? null : index)}
+                        >
+                          <span className="bill-addon-trigger-icon">＋</span>
+                          Add add-on
+                        </button>
+
+                        {pickerOpen && (
+                          <div className="bill-addon-picker" ref={pickerRef}>
+                            <div className="addon-picker-title">Choose add-on</div>
+                            <div className="addon-picker-list">
+                              {remainingAddons.map(addon => (
+                                <button
+                                  key={addon.id}
+                                  type="button"
+                                  className="addon-chip"
+                                  onClick={() => addAddonToLine(index, {
+                                    addonId: addon.id,
+                                    name: addon.name,
+                                    localizedNameHi: addon.localizedNameHi,
+                                    price: addon.price,
+                                  })}
+                                >
+                                  <span>{addon.name}</span>
+                                  {addon.price > 0
+                                    ? <span className="addon-chip-price">+{formatCurrency(addon.price)}</span>
+                                    : <span className="addon-chip-price" style={{ opacity: 0.5 }}>free</span>
+                                  }
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Item qty controls */}
+                  <div className="qty-controls">
+                    <button type="button" className="qty-btn" onClick={() => adjustItemQty(index, -1)}>−</button>
+                    <span className="qty-value">{item.qty}</span>
+                    <button type="button" className="qty-btn" onClick={() => adjustItemQty(index, 1)}>＋</button>
+                    <span className="text-muted" style={{ minWidth: 60, textAlign: 'right' }}>
+                      {formatCurrency(itemLineTotal(item))}
+                    </span>
+                  </div>
                 </div>
-                <div className="qty-controls">
-                  <button type="button" className="qty-btn" onClick={() => adjustItemQty(index, -1)}>−</button>
-                  <span className="qty-value">{item.qty}</span>
-                  <button type="button" className="qty-btn" onClick={() => adjustItemQty(index, 1)}>＋</button>
-                  <span className="text-muted" style={{ minWidth: 60, textAlign: 'right' }}>
-                    {formatCurrency(item.qty * item.unitPrice)}
-                  </span>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           <div className="order-total-strip">
@@ -292,6 +443,63 @@ export default function AddOrderForm({ onClose, order, onSaved }: Props) {
               value={note}
               onChange={e => setNote(e.target.value)}
             />
+          </div>
+
+          <div className="form-group">
+            <label className="form-label">Extra Charges (₹)</label>
+            {extraCharges.map((charge, idx) => (
+              <div key={idx} className="extra-charge-row" style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
+                <span style={{ fontSize: '0.85rem', flex: 1, color: 'var(--text-color)' }}>{charge.label}</span>
+                <span style={{ fontSize: '0.85rem', fontWeight: 600 }}>{formatCurrency(charge.amount)}</span>
+                <button
+                  type="button"
+                  className="addon-qty-btn"
+                  style={{ color: 'var(--danger-color)', border: 'none', background: 'transparent', cursor: 'pointer' }}
+                  onClick={() => {
+                    setExtraCharges(prev => prev.filter((_, i) => i !== idx));
+                  }}
+                  title="Remove charge"
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+            <div style={{ display: 'flex', gap: 6 }}>
+              <input
+                type="text"
+                className="input-field"
+                placeholder="e.g. Packaging"
+                style={{ flex: 2 }}
+                value={newChargeLabel}
+                onChange={e => setNewChargeLabel(e.target.value)}
+              />
+              <input
+                type="number"
+                className="input-field"
+                placeholder="Amt"
+                style={{ flex: 1 }}
+                min="0"
+                step="0.01"
+                value={newChargeAmount}
+                onChange={e => setNewChargeAmount(e.target.value)}
+              />
+              <button
+                type="button"
+                className="btn btn-ghost"
+                style={{ padding: '0 10px', height: 38, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                onClick={() => {
+                  const val = parseFloat(newChargeAmount);
+                  const lbl = newChargeLabel.trim();
+                  if (lbl && !Number.isNaN(val) && val > 0) {
+                    setExtraCharges(prev => [...prev, { label: lbl, amount: val }]);
+                    setNewChargeLabel('');
+                    setNewChargeAmount('');
+                  }
+                }}
+              >
+                ＋
+              </button>
+            </div>
           </div>
 
           <div className="form-group">

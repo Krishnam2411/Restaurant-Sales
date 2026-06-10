@@ -14,13 +14,20 @@
     "fs:allow-read-file",
     "fs:allow-write-file",
     "fs:allow-write-text-file",
+    "fs:allow-mkdir",
+    "fs:allow-exists",
     {
       "identifier": "fs:scope",
       "allow": [
         "$DOCUMENT/aalsi chatore/Ledgers",
         "$DOCUMENT/aalsi chatore/Ledgers/**",
         "$APPDATA/com.aalsi.chatore.sales",
-        "$APPDATA/com.aalsi.chatore.sales/**"
+        "$APPDATA/com.aalsi.chatore.sales/**",
+        "$DOCUMENT/**",
+        "$DESKTOP/**",
+        "$DOWNLOAD/**",
+        "$HOME/**",
+        "$PUBLIC/**"
       ]
     },
     "sql:allow-load",

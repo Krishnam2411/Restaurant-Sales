@@ -1,5 +1,5 @@
 import type { Order, OrderItem, PaymentMethod } from '../types';
-import { dbGetOrders, dbSaveOrders } from './db';
+import { dbGetOrders, dbSaveOrders, dbGetSales } from './db';
 import { v4 as uuid } from '../utils/uuid';
 
 function sortOrders(orders: Order[]): Order[] {
@@ -18,16 +18,43 @@ export async function getOrders(): Promise<Order[]> {
 
 export async function addOrder(data: Omit<Order, 'id' | 'code' | 'createdAt' | 'updatedAt' | 'completedAt' | 'status'> & { status?: Order['status'] }): Promise<Order> {
   const orders = await dbGetOrders();
-  const nextNumber = orders.reduce((max, order) => {
-    const match = order.code.match(/ORD-(\d+)/);
-    const value = match ? Number(match[1]) : 0;
-    return Math.max(max, value);
-  }, 0) + 1;
+
+  // Collect all existing order codes from open/completed orders and sales to ensure uniqueness
+  const existingCodes = new Set<string>();
+  orders.forEach(o => { if (o.code) existingCodes.add(o.code.toUpperCase()); });
+
+  try {
+    const sales = await dbGetSales();
+    sales.forEach(s => { if (s.orderCode) existingCodes.add(s.orderCode.toUpperCase()); });
+  } catch (err) {
+    console.warn('Failed to load sales for order code uniqueness check', err);
+  }
+
+  // Generate a unique 6-character alphanumeric code
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let generatedCode = '';
+  let attempts = 0;
+  while (attempts < 1000) {
+    let code = '';
+    for (let i = 0; i < 6; i++) {
+      code += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    if (!existingCodes.has(code)) {
+      generatedCode = code;
+      break;
+    }
+    attempts++;
+  }
+  if (!generatedCode) {
+    // Extreme fallback if somehow collision storm happens
+    generatedCode = `ORD-${Date.now().toString().slice(-4)}`;
+  }
+
   const now = new Date().toISOString();
   const order: Order = {
     ...data,
     id: uuid(),
-    code: `ORD-${String(nextNumber).padStart(4, '0')}`,
+    code: generatedCode,
     status: data.status ?? 'Open',
     createdAt: now,
     updatedAt: now,

@@ -21,12 +21,16 @@ interface ManageOrdersProps {
 const PAYMENT_METHODS: PaymentMethod[] = ['Cash', 'UPI', 'Both'];
 
 function orderSubtotal(items: OrderItem[]): number {
-  return items.reduce((sum, item) => sum + item.qty * item.unitPrice, 0);
+  return items.reduce((sum, item) => {
+    const addonTotal = (item.addons ?? []).reduce((s, a) => s + (a.qty ?? 1) * a.price, 0);
+    return sum + item.qty * item.unitPrice + addonTotal;
+  }, 0);
 }
 
-function orderTotalWithDiscount(items: OrderItem[], discount?: number): number {
-  const subtotal = orderSubtotal(items);
-  return Math.max(0, subtotal - (discount ?? 0));
+function orderTotalWithChargesAndDiscount(order: Order): number {
+  const subtotal = orderSubtotal(order.items);
+  const chargesSum = (order.extraCharges ?? []).reduce((sum, c) => sum + c.amount, 0);
+  return Math.max(0, subtotal + chargesSum - (order.discount ?? 0));
 }
 
 function formatOrderItemLine(item: OrderItem): string {
@@ -43,6 +47,22 @@ export default function ManageOrders({ onNewOrder, onEditOrder }: ManageOrdersPr
   const [upiAmount, setUpiAmount] = useState('');
   const [previewing, setPreviewing] = useState(false);
   const [cancelConfirmOpen, setCancelConfirmOpen] = useState(false);
+  const [servedItems, setServedItems] = useState<Record<string, boolean>>(() => {
+    try {
+      const saved = localStorage.getItem('served_items');
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
+
+  const toggleServedItem = (key: string) => {
+    setServedItems(prev => {
+      const next = { ...prev, [key]: !prev[key] };
+      localStorage.setItem('served_items', JSON.stringify(next));
+      return next;
+    });
+  };
 
   useEffect(() => {
     load();
@@ -68,7 +88,7 @@ export default function ManageOrders({ onNewOrder, onEditOrder }: ManageOrdersPr
       setUpiAmount('');
       return;
     }
-    const total = orderTotalWithDiscount(selectedOrder.items, selectedOrder.discount ?? 0);
+    const total = orderTotalWithChargesAndDiscount(selectedOrder);
     const method = selectedOrder.paymentMethod ?? 'Cash';
     const resolvedMethod = method === 'Unpaid' ? 'Cash' : method;
     setPaymentMethod(resolvedMethod);
@@ -89,7 +109,7 @@ export default function ManageOrders({ onNewOrder, onEditOrder }: ManageOrdersPr
   const handleComplete = () => {
     void (async () => {
       if (!selectedOrder) return;
-      const currentTotal = orderTotalWithDiscount(selectedOrder.items, selectedOrder.discount ?? 0);
+      const currentTotal = orderTotalWithChargesAndDiscount(selectedOrder);
       if (currentTotal <= 0) {
         showToast('Add items before completing the order', 'error');
         return;
@@ -137,7 +157,31 @@ export default function ManageOrders({ onNewOrder, onEditOrder }: ManageOrdersPr
           name: item.name,
           qty: item.qty,
           unitPrice: item.unitPrice,
+          addons: item.addons,
         }));
+
+      const subtotalForSales = selectedOrder.items
+        .filter(item => item.countsInSales)
+        .reduce((sum, item) => {
+          const addonTotal = (item.addons ?? []).reduce((s, a) => s + (a.qty ?? 1) * a.price, 0);
+          return sum + item.qty * item.unitPrice + addonTotal;
+        }, 0);
+      const saleChargesSum = (selectedOrder.extraCharges ?? []).reduce((s, c) => s + c.amount, 0);
+      const saleAmount = Math.max(0, subtotalForSales + saleChargesSum - (selectedOrder.discount ?? 0));
+
+      let saleCash: number | undefined;
+      let saleUpi: number | undefined;
+      if (paymentMethod === 'Cash') {
+        saleCash = saleAmount;
+        saleUpi = 0;
+      } else if (paymentMethod === 'UPI') {
+        saleCash = 0;
+        saleUpi = saleAmount;
+      } else {
+        const cashRatio = currentTotal > 0 ? (nextCash ?? 0) / currentTotal : 0.5;
+        saleCash = +(saleAmount * cashRatio).toFixed(2);
+        saleUpi = +(saleAmount - saleCash).toFixed(2);
+      }
 
       const extraSummary = selectedOrder.items
         .filter(item => !item.countsInSales)
@@ -149,11 +193,26 @@ export default function ManageOrders({ onNewOrder, onEditOrder }: ManageOrdersPr
         date: todayISO(),
         time: nowTime(),
         items: saleItems,
-        amount: currentTotal,
+        amount: saleAmount,
         discount: selectedOrder.discount ?? undefined,
         channel: selectedOrder.type,
         paymentMethod,
+        cashAmount: saleCash,
+        upiAmount: saleUpi,
         note: [selectedOrder.note?.trim() ?? '', extraSummary ? `Extras: ${extraSummary}` : ''].filter(Boolean).join(' · ') || undefined,
+        extraCharges: selectedOrder.extraCharges,
+      });
+
+      // cleanup served items from localStorage
+      setServedItems(prev => {
+        const next = { ...prev };
+        Object.keys(next).forEach(k => {
+          if (k.startsWith(`${selectedOrder.code}-`)) {
+            delete next[k];
+          }
+        });
+        localStorage.setItem('served_items', JSON.stringify(next));
+        return next;
       });
 
       showToast('Order completed', 'success');
@@ -171,7 +230,9 @@ export default function ManageOrders({ onNewOrder, onEditOrder }: ManageOrdersPr
     void (async () => {
       setPreviewing(true);
       try {
-        const total = orderTotalWithDiscount(selectedOrder.items, selectedOrder.discount ?? 0);
+        const subtotal = orderSubtotal(selectedOrder.items);
+        const chargesSum = (selectedOrder.extraCharges ?? []).reduce((s, c) => s + c.amount, 0);
+        const total = Math.max(0, subtotal + chargesSum - (selectedOrder.discount ?? 0));
         const logoUrl = await getLogoDataUri();
         const doc = {
           kind: 'bill' as const,
@@ -184,17 +245,25 @@ export default function ManageOrders({ onNewOrder, onEditOrder }: ManageOrdersPr
           lines: selectedOrder.items.map(item => {
             const menuItem = item.menuItemId ? menuItems.find(m => m.id === item.menuItemId) : undefined;
             const sourceName = menuItem?.name ?? item.name;
+            const addonTotal = (item.addons ?? []).reduce((s, a) => s + (a.qty ?? 1) * a.price, 0);
             return {
               name: sourceName,
               hindiName: menuItem?.localizedNameHi?.trim() || sourceName,
               qty: item.qty,
               unitPrice: item.unitPrice,
-              lineTotal: item.qty * item.unitPrice,
+              lineTotal: item.qty * item.unitPrice + addonTotal,
+              addons: (item.addons ?? []).map(a => ({
+                name: a.name,
+                hindiName: a.localizedNameHi || a.name,
+                price: (a.qty ?? 1) * a.price,
+                qty: a.qty ?? 1,
+              })),
             };
           }),
           discount: selectedOrder.discount,
           total,
           logoUrl,
+          extraCharges: selectedOrder.extraCharges,
         };
         const html = buildBillHtml(doc, 80);
         await previewReceipt(html);
@@ -228,6 +297,12 @@ export default function ManageOrders({ onNewOrder, onEditOrder }: ManageOrdersPr
               qty: remaining,
               unitPrice: item.unitPrice,
               lineTotal: item.qty * item.unitPrice,
+              addons: (item.addons ?? []).map(a => ({
+                name: a.name,
+                hindiName: a.localizedNameHi || a.name,
+                price: (a.qty ?? 1) * a.price,
+                qty: a.qty ?? 1,
+              })),
             };
           });
 
@@ -265,6 +340,37 @@ export default function ManageOrders({ onNewOrder, onEditOrder }: ManageOrdersPr
   const handleCancelOrder = () => {
     void (async () => {
       if (!selectedOrder) return;
+
+      const saleItems: SaleItem[] = selectedOrder.items
+        .filter(item => item.countsInSales)
+        .map(item => ({
+          menuItemId: item.menuItemId,
+          name: item.name,
+          qty: item.qty,
+          unitPrice: item.unitPrice,
+          addons: item.addons,
+        }));
+
+      const extraSummary = selectedOrder.items
+        .filter(item => !item.countsInSales)
+        .map(item => `${item.qty}x ${item.name}`)
+        .join(', ');
+
+      addSale({
+        orderCode: selectedOrder.code,
+        date: todayISO(),
+        time: nowTime(),
+        items: saleItems,
+        amount: 0,
+        discount: selectedOrder.discount ?? undefined,
+        channel: selectedOrder.type,
+        paymentMethod: 'Cancelled',
+        cashAmount: 0,
+        upiAmount: 0,
+        note: [selectedOrder.note?.trim() ?? '', extraSummary ? `Extras: ${extraSummary}` : '', 'Cancelled Order'].filter(Boolean).join(' · ') || undefined,
+        extraCharges: selectedOrder.extraCharges,
+      });
+
       await saveOrderUpdate(selectedOrder.id, {
         type: selectedOrder.type,
         customerName: selectedOrder.customerName,
@@ -275,6 +381,19 @@ export default function ManageOrders({ onNewOrder, onEditOrder }: ManageOrdersPr
         note: selectedOrder.note,
         status: 'Cancelled',
       });
+
+      // cleanup served items from localStorage
+      setServedItems(prev => {
+        const next = { ...prev };
+        Object.keys(next).forEach(k => {
+          if (k.startsWith(`${selectedOrder.code}-`)) {
+            delete next[k];
+          }
+        });
+        localStorage.setItem('served_items', JSON.stringify(next));
+        return next;
+      });
+
       showToast('Order cancelled', 'success');
       setSelectedOrderId('');
       setCancelConfirmOpen(false);
@@ -312,11 +431,11 @@ export default function ManageOrders({ onNewOrder, onEditOrder }: ManageOrdersPr
               onClick={() => setSelectedOrderId(order.id)}
             >
               <div className="order-card-top">
-                <strong>OrderId: {order.code}</strong>
+                <strong>#{order.code}</strong>
                 <span className="order-card-open">Click to Open</span>
               </div>
               <div className="order-card-meta">
-                {order.type} - {formatCurrency(orderTotalWithDiscount(order.items, order.discount))}
+                {order.type} - {formatCurrency(orderTotalWithChargesAndDiscount(order))}
               </div>
               {order.customerName?.trim() && (
                 <div className="order-card-label">Customer/Table: {order.customerName.trim()}</div>
@@ -327,9 +446,41 @@ export default function ManageOrders({ onNewOrder, onEditOrder }: ManageOrdersPr
               <div className="order-card-items">
                 {order.items.length === 0 ? (
                   <span className="text-muted">No items</span>
-                ) : order.items.map((item, index) => (
-                  <span key={`${item.name}-${index}`}>{formatOrderItemLine(item)}</span>
-                ))}
+                ) : order.items.map((item, index) => {
+                  const itemKey = `${order.code}-${item.name}-${index}`;
+                  const isServed = servedItems[itemKey] || false;
+                  return (
+                    <span key={`${item.name}-${index}`} className="order-card-item-group">
+                      <span className="order-card-item-main" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <input
+                          type="checkbox"
+                          checked={isServed}
+                          onClick={e => e.stopPropagation()}
+                          onChange={() => toggleServedItem(itemKey)}
+                          style={{
+                            cursor: 'pointer',
+                            width: 14,
+                            height: 14,
+                            accentColor: 'var(--gold)',
+                            margin: 0,
+                          }}
+                        />
+                        <span style={{ textDecoration: isServed ? 'line-through' : 'none', opacity: isServed ? 0.6 : 1 }}>
+                          {formatOrderItemLine(item)}
+                        </span>
+                      </span>
+                      {(item.addons ?? []).map((addon, ai) => (
+                        <span key={ai} className="order-card-item-addon" style={{ opacity: isServed ? 0.6 : 1 }}>
+                          <span className="order-card-addon-arrow">↳</span>
+                          <span>
+                            {addon.price > 0 ? `+ ${addon.name}` : addon.name}
+                            {(addon.qty ?? 1) > 1 ? ` ×${addon.qty}` : ''}
+                          </span>
+                        </span>
+                      ))}
+                    </span>
+                  );
+                })}
               </div>
             </button>
           ))}
@@ -343,7 +494,7 @@ export default function ManageOrders({ onNewOrder, onEditOrder }: ManageOrdersPr
           <div className="panel">
             <div className="panel-header">
               <div>
-                <h4>{selectedOrder.code}</h4>
+                <h4>#{selectedOrder.code}</h4>
                 <p>
                   {selectedOrder.type}
                   {selectedOrder.customerName ? ` · ${selectedOrder.customerName}` : ''}
@@ -393,6 +544,19 @@ export default function ManageOrders({ onNewOrder, onEditOrder }: ManageOrdersPr
                       {!item.countsInSales && <span className="bill-line-tag">Extra</span>}
                     </div>
                     <div className="bill-line-meta">₹{item.unitPrice.toLocaleString('en-IN')} each</div>
+                    {/* Add-on child rows */}
+                    {(item.addons ?? []).map((addon, ai) => (
+                      <div key={ai} className="bill-line-addon">
+                        <span className="bill-line-addon-arrow">↳</span>
+                        <span className="bill-line-addon-name">
+                          {addon.name}{(addon.qty ?? 1) > 1 ? <span style={{ opacity: 0.65, fontSize: '0.75rem', marginLeft: 3 }}>×{addon.qty}</span> : null}
+                        </span>
+                        {addon.price > 0
+                          ? <span className="bill-line-addon-price">+{formatCurrency((addon.qty ?? 1) * addon.price)}</span>
+                          : <span className="bill-line-addon-price bill-line-addon-free">free</span>
+                        }
+                      </div>
+                    ))}
                   </div>
                   <div className="qty-controls">
                     <span className="qty-value">x{item.qty}</span>
@@ -402,6 +566,30 @@ export default function ManageOrders({ onNewOrder, onEditOrder }: ManageOrdersPr
                   </div>
                 </div>
               ))}
+            </div>
+
+            {/* Simple tabular totals breakdown */}
+            <div className="bill-summary-breakdown" style={{ marginTop: 16, padding: '12px 0' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6, fontSize: '0.875rem', color: 'var(--muted)' }}>
+                <span>Subtotal</span>
+                <span>{formatCurrency(orderSubtotal(selectedOrder.items))}</span>
+              </div>
+              {(selectedOrder.extraCharges ?? []).map((charge, idx) => (
+                <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6, fontSize: '0.875rem', color: 'var(--muted)' }}>
+                  <span>{charge.label}</span>
+                  <span>{formatCurrency(charge.amount)}</span>
+                </div>
+              ))}
+              {selectedOrder.discount ? (
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6, fontSize: '0.875rem', color: 'var(--tomato)' }}>
+                  <span>Discount</span>
+                  <span>-{formatCurrency(selectedOrder.discount)}</span>
+                </div>
+              ) : null}
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8, paddingTop: 12, borderTop: '1px dashed var(--border)', fontWeight: 'bold', fontSize: '1.15rem', color: 'var(--ink)' }}>
+                <span>Total</span>
+                <span>{formatCurrency(orderTotalWithChargesAndDiscount(selectedOrder))}</span>
+              </div>
             </div>
 
             <div className="payment-section" style={{ marginTop: 12 }}>
@@ -414,7 +602,7 @@ export default function ManageOrders({ onNewOrder, onEditOrder }: ManageOrdersPr
                       type="button"
                       className={`payment-btn${paymentMethod === method ? ` selected-${method.toLowerCase()}` : ''}`}
                       onClick={() => {
-                        const total = orderTotalWithDiscount(selectedOrder.items, selectedOrder.discount ?? 0);
+                        const total = orderTotalWithChargesAndDiscount(selectedOrder);
                         setPaymentMethod(method);
                         if (method === 'Cash') {
                           setCashAmount(String(total));
@@ -461,7 +649,7 @@ export default function ManageOrders({ onNewOrder, onEditOrder }: ManageOrdersPr
                 </div>
               )}
 
-              <div className="modal-actions" style={{ padding: 0, marginTop: 8 }}>
+              <div className="modal-actions" style={{ padding: 0, marginTop: 12 }}>
                 <button type="button" className="btn btn-primary" onClick={handleComplete} disabled={!canComplete}>Complete Order</button>
               </div>
             </div>

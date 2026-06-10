@@ -6,7 +6,8 @@ import { getSalesByDateRange } from '../services/salesService';
 import { getSetting } from '../services/db';
 import { jsPDF } from 'jspdf';
 import { join } from '@tauri-apps/api/path';
-import { writeFile } from '@tauri-apps/plugin-fs';
+import { writeFile, mkdir } from '@tauri-apps/plugin-fs';
+import { dirname } from '@tauri-apps/api/path';
 import ExcelJS, { type FillPattern, type Color } from 'exceljs';
 import brandLogo from '../assets/aalsi-chatore-mascot.png';
 
@@ -140,16 +141,29 @@ async function loadImageDataUrl(src: string): Promise<string | null> {
 
 const EXPORT_FOLDER_SETTING_KEY = 'restrosales__exportFolderPath';
 
-async function getExportDestination(filename: string): Promise<string | null> {
+async function getExportDestination(filename: string, subfolder: string): Promise<string | null> {
   if (!isTauri()) return null;
   const folderPath = (await getSetting(EXPORT_FOLDER_SETTING_KEY))?.trim();
   if (!folderPath) return null;
-  return join(folderPath, filename);
+  return join(folderPath, subfolder, filename);
 }
 
-export async function exportSalesXLSXForDate(date: string): Promise<void> {
+async function writeTauriFile(destination: string, data: Uint8Array): Promise<boolean> {
   try {
-    const sales = await getSalesByDateRange(date, date);
+    // Ensure directory exists before writing (important on Windows)
+    const dir = await dirname(destination);
+    await mkdir(dir, { recursive: true });
+    await writeFile(destination, data);
+    return true;
+  } catch (err) {
+    console.warn('Tauri writeFile failed, falling back to browser download', destination, err);
+    return false;
+  }
+}
+
+export async function exportSalesXLSXForDate(date: string, preFilteredSales?: Sale[]): Promise<void> {
+  try {
+    const sales = preFilteredSales ?? await getSalesByDateRange(date, date);
     const totalSales = sales.reduce((sum, sale) => sum + (sale.amount ?? 0), 0);
     const formattedDate = formatLongDate(date);
     const theme = getExportTheme();
@@ -159,13 +173,6 @@ export async function exportSalesXLSXForDate(date: string): Promise<void> {
 
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Sales Ledger');
-    
-    sheet.views = [
-      {
-        state: 'frozen',
-        ySplit: 5,
-      },
-    ];
 
     sheet.pageSetup = {
       orientation: 'landscape',
@@ -396,11 +403,12 @@ export async function exportSalesXLSXForDate(date: string): Promise<void> {
 
     const fileBuffer = await workbook.xlsx.writeBuffer();
     const filename = `sales_${date}.xlsx`;
-    const destination = await getExportDestination(filename);
+    const destination = await getExportDestination(filename, 'xlsx');
 
     if (destination) {
-      await writeFile(destination, new Uint8Array(fileBuffer));
-      return;
+      const wrote = await writeTauriFile(destination, new Uint8Array(fileBuffer));
+      if (wrote) return;
+      // Fall through to browser download if write failed
     }
 
     const blob = new Blob([fileBuffer], {
@@ -563,16 +571,17 @@ async function buildLedgerPdf(sales: Sale[], date: string): Promise<Uint8Array> 
   return new Uint8Array(doc.output('arraybuffer'));
 }
 
-export async function exportSalesPDFForDate(date: string): Promise<void> {
+export async function exportSalesPDFForDate(date: string, preFilteredSales?: Sale[]): Promise<void> {
   try {
-    const sales = await getSalesByDateRange(date, date);
+    const sales = preFilteredSales ?? await getSalesByDateRange(date, date);
     const pdfBytes = await buildLedgerPdf(sales, date);
     const filename = `sales_${date}.pdf`;
 
-    const destination = await getExportDestination(filename);
+    const destination = await getExportDestination(filename, 'pdf');
     if (destination) {
-      await writeFile(destination, pdfBytes);
-      return;
+      const wrote = await writeTauriFile(destination, pdfBytes);
+      if (wrote) return;
+      // Fall through to browser download if write failed
     }
 
     const pdfBuffer = pdfBytes.buffer.slice(pdfBytes.byteOffset, pdfBytes.byteOffset + pdfBytes.byteLength) as ArrayBuffer;

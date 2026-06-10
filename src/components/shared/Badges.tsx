@@ -9,6 +9,7 @@ const BADGE: Record<PaymentMethod, string> = {
   Both: 'badge-both',
   Unpaid: 'badge-both',
   Split: 'badge-both',
+  Cancelled: 'badge-cancelled',
 };
 const ICON: Record<PaymentMethod, IconName> = {
   Cash: 'cash',
@@ -16,6 +17,7 @@ const ICON: Record<PaymentMethod, IconName> = {
   Both: 'card',
   Unpaid: 'receipt',
   Split: 'receipt',
+  Cancelled: 'cancel',
 };
 
 export function PaymentBadge({ method }: { method: PaymentMethod }) {

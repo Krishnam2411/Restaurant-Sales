@@ -1,5 +1,5 @@
 import { APP_CONFIG } from "../config/appConfig";
-import type { MenuItem, Order, OrderItem, Sale } from "../types";
+import type { MenuItem, Order, OrderItem, Sale, ExtraCharge } from "../types";
 import { formatCurrency } from "../utils/currencyUtils";
 import { updateOrder as updateOrderService } from "./orderService";
 import { getPrinterSettings, printReceipt } from "./printerService";
@@ -14,14 +14,15 @@ export type PrintableLine = {
   qty: number;
   unitPrice?: number;
   lineTotal?: number;
+  addons?: { name: string; hindiName: string; price: number }[];
 };
 
 export type PrintableDocumentKind = "bill" | "kot";
 
-type PrintableOrder = Pick<Order, "code" | "discount" | "note" | "items">;
+type PrintableOrder = Pick<Order, "code" | "discount" | "note" | "items" | "extraCharges">;
 type PrintableSale = Pick<
   Sale,
-  "orderCode" | "discount" | "note" | "items" | "amount"
+  "orderCode" | "discount" | "note" | "items" | "amount" | "extraCharges"
 >;
 
 export interface PrintableDocument {
@@ -40,6 +41,7 @@ export interface PrintableDocument {
   total?: number;
   /** Optional logo — absolute URL or data-URI rendered above restaurant name */
   logoUrl?: string;
+  extraCharges?: ExtraCharge[];
 }
 
 export interface PrintAdapter {
@@ -104,16 +106,26 @@ export function buildBillHtml(
 ): string {
   const linesHtml = document.lines
     .map(
-      (line) => `
+      (line) => {
+        const addonsHtml = (line.addons ?? []).map(a =>
+          `<div class="addon-line">↳ ${escapeHtml(a.name)}${a.price > 0 ? ` <span class="addon-price">+${escapeHtml(formatCurrency(a.price))}</span>` : ' <span class="addon-price addon-free">free</span>'}</div>`
+        ).join('');
+        return `
       <div class="line">
         <div class="line-main">
           <div class="item-name">${escapeHtml(line.name)}</div>
           <div class="line-total">${escapeHtml(formatCurrency(line.lineTotal ?? 0))}</div>
         </div>
         <div class="line-meta">${line.qty} x ${escapeHtml(formatCurrency(line.unitPrice ?? 0))}</div>
-      </div>`,
+        ${addonsHtml}
+      </div>`;
+      },
     )
     .join("");
+
+  const chargesHtml = (document.extraCharges ?? [])
+    .map(c => `<div class="total-row"><span>${escapeHtml(c.label)}</span>+ ${escapeHtml(formatCurrency(c.amount))}</div>`)
+    .join('');
 
   const discountHtml =
     document.discount && document.discount > 0
@@ -234,6 +246,9 @@ export function buildBillHtml(
       .item-name  { font-size: 15px; font-weight: 500; flex: 1; }
       .line-total { font-size: 14px; font-weight: 600; white-space: nowrap; }
       .line-meta  { font-size: 12px; color: #555; margin-top: 1px; }
+      .addon-line { font-size: 11px; color: #555; padding-left: 10px; margin-top: 2px; }
+      .addon-price { font-weight: 600; color: #333; }
+      .addon-free  { color: #888; }
 
       /* Totals */
       .totals {
@@ -280,6 +295,7 @@ export function buildBillHtml(
       ${linesHtml}
       
       <div class="totals">
+        ${chargesHtml}
         ${discountHtml}
         <div class="total-row total-grand">
         <span>Total</span>
@@ -308,13 +324,19 @@ export function buildKotHtml(
 ): string {
   const linesHtml = document.lines
     .map(
-      (line) => `
+      (line) => {
+        const addonsHtml = (line.addons ?? []).map(a =>
+          `<div class="addon-line">↳ ${escapeHtml(a.hindiName || a.name)}</div>`
+        ).join('');
+        return `
       <div class="line">
         <div class="line-main">
           <div class="item-name">${escapeHtml(line.hindiName)}</div>
           <div class="qty">x${line.qty}</div>
         </div>
-      </div>`,
+        ${addonsHtml}
+      </div>`;
+      },
     )
     .join("");
 
@@ -427,6 +449,7 @@ export function buildKotHtml(
       }
       .item-name { font-size: 16px; font-weight: 500; flex: 1; }
       .qty       { font-size: 14px; font-weight: 700; white-space: nowrap; }
+      .addon-line { font-size: 13px; color: #444; padding-left: 10px; margin-top: 2px; }
 
       /* Note */
       .note {
@@ -488,7 +511,10 @@ const activePrinter: PrintAdapter = new TauriPrinterAdapter();
 // ---------------------------------------------------------------------------
 
 function sumItems(items: OrderItem[]): number {
-  return items.reduce((sum, item) => sum + item.qty * item.unitPrice, 0);
+  return items.reduce((sum, item) => {
+    const addonTotal = (item.addons ?? []).reduce((s, a) => s + (a.qty ?? 1) * a.price, 0);
+    return sum + item.qty * item.unitPrice + addonTotal;
+  }, 0);
 }
 
 function buildLines(
@@ -501,12 +527,20 @@ function buildLines(
       ? menuById.get(item.menuItemId)
       : undefined;
     const sourceName = menuItem?.name ?? item.name;
+    const addonTotal = (item.addons ?? []).reduce((s, a) => s + (a.qty ?? 1) * a.price, 0);
     return {
       name: sourceName,
       hindiName: menuItem?.localizedNameHi?.trim() || sourceName,
       qty: item.qty,
       unitPrice: item.unitPrice,
-      lineTotal: item.qty * item.unitPrice,
+      lineTotal: item.qty * item.unitPrice + addonTotal,
+      addons: (item.addons ?? []).map(a => ({
+        name: a.qty && a.qty > 1 ? `${a.name} ×${a.qty}` : a.name,
+        hindiName: a.localizedNameHi
+          ? (a.qty && a.qty > 1 ? `${a.localizedNameHi} ×${a.qty}` : a.localizedNameHi)
+          : (a.qty && a.qty > 1 ? `${a.name} ×${a.qty}` : a.name),
+        price: (a.qty ?? 1) * a.price,
+      })),
     };
   });
 }
@@ -530,6 +564,7 @@ function buildBillDocument(
     note: source.note,
     generatedAt: new Date().toLocaleString("en-IN"),
     logoUrl: "/outlined-logo.png",
+    extraCharges: source.extraCharges,
   };
 }
 
@@ -553,6 +588,13 @@ function buildKotDocument(
       qty: remaining,
       unitPrice: item.unitPrice,
       lineTotal: item.qty * item.unitPrice,
+      addons: (item.addons ?? []).map(a => ({
+        name: a.qty && a.qty > 1 ? `${a.name} ×${a.qty}` : a.name,
+        hindiName: a.localizedNameHi
+          ? (a.qty && a.qty > 1 ? `${a.localizedNameHi} ×${a.qty}` : a.localizedNameHi)
+          : (a.qty && a.qty > 1 ? `${a.name} ×${a.qty}` : a.name),
+        price: (a.qty ?? 1) * a.price,
+      })),
     });
   }
 
@@ -576,7 +618,9 @@ export async function printOrderBill(
   order: Order,
   menuItems: MenuItem[],
 ): Promise<void> {
-  const total = Math.max(0, sumItems(order.items) - (order.discount ?? 0));
+  const subtotal = sumItems(order.items);
+  const chargesSum = (order.extraCharges ?? []).reduce((s, c) => s + c.amount, 0);
+  const total = Math.max(0, subtotal + chargesSum - (order.discount ?? 0));
   const doc = buildBillDocument(order, menuItems, order.code, total);
   doc.logoUrl = await getLogoDataUri();
   await activePrinter.print(doc);
@@ -616,9 +660,11 @@ export async function printSaleBill(
   sale: Sale,
   menuItems: MenuItem[],
 ): Promise<void> {
+  const subtotal = sumItems(sale.items as OrderItem[]);
+  const chargesSum = (sale.extraCharges ?? []).reduce((s, c) => s + c.amount, 0);
   const total =
     sale.amount ??
-    Math.max(0, sumItems(sale.items as OrderItem[]) - (sale.discount ?? 0));
+    Math.max(0, subtotal + chargesSum - (sale.discount ?? 0));
   const orderId = sale.orderCode ?? sale.id;
   const doc = buildBillDocument(sale as PrintableSale, menuItems, orderId, total);
   doc.logoUrl = await getLogoDataUri();

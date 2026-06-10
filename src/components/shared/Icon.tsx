@@ -24,6 +24,8 @@ import {
   Square,
   ChevronDown,
   Printer,
+  CircleX,
+  Filter,
 } from 'lucide-react';
 
 type IconName =
@@ -50,7 +52,9 @@ type IconName =
   | 'down'
   | 'panel-left-close'
   | 'panel-left-open'
-  | 'printer';
+  | 'printer'
+  | 'cancel'
+  | 'filter';
 
 interface IconProps {
   name: IconName;
@@ -83,6 +87,8 @@ const ICONS: Record<IconName, LucideIcon> = {
   'panel-left-close': PanelLeftClose,
   'panel-left-open': PanelLeftOpen,
   printer: Printer,
+  cancel: CircleX,
+  filter: Filter,
 };
 
 const FALLBACK_ICON = Square;

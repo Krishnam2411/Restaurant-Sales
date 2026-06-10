@@ -1,4 +1,4 @@
-import type { MenuItem } from '../types';
+import type { Addon, MenuItem } from '../types';
 import { dbGetMenuCategories, dbGetMenuItems, dbSaveMenuCategories, dbSaveMenuItems } from './db';
 import { v4 as uuid } from '../utils/uuid';
 
@@ -81,4 +81,44 @@ export async function removeCategory(name: string): Promise<void> {
   const [items, categories] = await Promise.all([dbGetMenuItems(), dbGetMenuCategories()]);
   await dbSaveMenuCategories(categories.filter(cat => cat !== name));
   await dbSaveMenuItems(items.filter(item => item.category !== name));
+}
+
+// ── Add-on helpers ──────────────────────────────────────
+
+export async function addAddonToItem(
+  itemId: string,
+  data: Omit<Addon, 'id'>
+): Promise<void> {
+  const items = await dbGetMenuItems();
+  const idx = items.findIndex(i => i.id === itemId);
+  if (idx === -1) throw new Error('Item not found');
+  const newAddon: Addon = { ...data, id: uuid() };
+  items[idx] = { ...items[idx], addons: [...(items[idx].addons ?? []), newAddon] };
+  await dbSaveMenuItems(items);
+}
+
+export async function updateAddonOnItem(
+  itemId: string,
+  addonId: string,
+  data: Partial<Omit<Addon, 'id'>>
+): Promise<void> {
+  const items = await dbGetMenuItems();
+  const idx = items.findIndex(i => i.id === itemId);
+  if (idx === -1) throw new Error('Item not found');
+  const addons = (items[idx].addons ?? []).map(a =>
+    a.id === addonId ? { ...a, ...data } : a
+  );
+  items[idx] = { ...items[idx], addons };
+  await dbSaveMenuItems(items);
+}
+
+export async function removeAddonFromItem(
+  itemId: string,
+  addonId: string
+): Promise<void> {
+  const items = await dbGetMenuItems();
+  const idx = items.findIndex(i => i.id === itemId);
+  if (idx === -1) throw new Error('Item not found');
+  items[idx] = { ...items[idx], addons: (items[idx].addons ?? []).filter(a => a.id !== addonId) };
+  await dbSaveMenuItems(items);
 }

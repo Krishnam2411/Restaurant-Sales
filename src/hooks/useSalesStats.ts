@@ -8,15 +8,17 @@ export function useSalesStats(sales: Sale[]) {
     const weekStart = startOfWeekISO();
     const monthStart = startOfMonthISO();
 
-    const todaySales = sales.filter(s => s.date === today);
-    const weekSales = sales.filter(s => s.date >= weekStart);
-    const monthSales = sales.filter(s => s.date >= monthStart);
+    const activeSales = sales.filter(s => s.paymentMethod !== 'Cancelled');
+
+    const todaySales = activeSales.filter(s => s.date === today);
+    const weekSales = activeSales.filter(s => s.date >= weekStart);
+    const monthSales = activeSales.filter(s => s.date >= monthStart);
 
     const sum = (arr: Sale[]) => arr.reduce((a, s) => a + s.amount, 0);
 
     // Top items by qty sold
     const itemMap = new Map<string, TopItem>();
-    for (const sale of sales) {
+    for (const sale of activeSales) {
       for (const item of sale.items) {
         const existing = itemMap.get(item.name);
         if (existing) {
@@ -37,7 +39,7 @@ export function useSalesStats(sales: Sale[]) {
 
     // Payment split
     const payMap = new Map<PaymentMethod, PaymentSplit>();
-    for (const s of sales) {
+    for (const s of activeSales) {
       const existing = payMap.get(s.paymentMethod);
       if (existing) {
         existing.count += 1;
@@ -50,7 +52,7 @@ export function useSalesStats(sales: Sale[]) {
 
     // Best day
     const dayMap = new Map<string, number>();
-    for (const s of sales) {
+    for (const s of activeSales) {
       dayMap.set(s.date, (dayMap.get(s.date) ?? 0) + s.amount);
     }
     const bestDayRevenue = Math.max(0, ...Array.from(dayMap.values()));
@@ -62,9 +64,9 @@ export function useSalesStats(sales: Sale[]) {
       weekOrders: weekSales.length,
       monthRevenue: sum(monthSales),
       monthOrders: monthSales.length,
-      totalRevenue: sum(sales),
-      totalOrders: sales.length,
-      avgOrderValue: sales.length ? sum(sales) / sales.length : 0,
+      totalRevenue: sum(activeSales),
+      totalOrders: activeSales.length,
+      avgOrderValue: activeSales.length ? sum(activeSales) / activeSales.length : 0,
       bestDayRevenue,
       topItems,
       paymentSplit,

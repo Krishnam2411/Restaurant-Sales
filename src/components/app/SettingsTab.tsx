@@ -199,6 +199,43 @@ export default function SettingsTab({
       <div className="settings-card">
         <div className="settings-row">
           <div>
+            <div className="settings-title">Export folder path</div>
+            <div className="muted">All exported ledger pdfs and xlsx are saved here.</div>
+          </div>
+          <div style={{ display: 'grid', gap: 8, minWidth: 280, maxWidth: 420, width: '100%' }}>
+            <div
+              className="input-field"
+              style={{ display: 'flex', alignItems: 'center', minHeight: 42, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+              title={exportFolderPath || 'No folder selected'}
+              >
+              {exportFolderPath || 'No folder selected'}
+            </div>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button type="button" className="btn btn-ghost" onClick={onChooseExportFolder}>Choose folder</button>
+              <button type="button" className="btn btn-ghost" onClick={onClearExportFolder}>Clear</button>
+            </div>
+          </div>
+        </div>
+
+        <div className="settings-row">
+          <div>
+            <div className="settings-title">Experimental analytics</div>
+            <div className="muted">Enable the analytics tab (experimental). Still in development.</div>
+          </div>
+          <label className="switch" aria-label="Experimental analytics toggle">
+            <input
+              type="checkbox"
+              checked={analyticsExperimentalEnabled}
+              onChange={e => onToggleAnalyticsExperimental(e.target.checked)}
+              />
+            <span className="switch-track">
+              <span className="switch-thumb" />
+            </span>
+          </label>
+        </div>
+
+        <div className="settings-row">
+          <div>
             <div className="settings-title">Testing mode</div>
             <div className="muted">Temporary database is used for experimentation only.</div>
           </div>
@@ -223,43 +260,6 @@ export default function SettingsTab({
             <button className="btn btn-danger" onClick={() => void onCleanDatabase()}>
               Clean current DB
             </button>
-          </div>
-        </div>
-
-        <div className="settings-row">
-          <div>
-            <div className="settings-title">Experimental analytics</div>
-            <div className="muted">Enable the analytics tab (experimental). Still in development.</div>
-          </div>
-          <label className="switch" aria-label="Experimental analytics toggle">
-            <input
-              type="checkbox"
-              checked={analyticsExperimentalEnabled}
-              onChange={e => onToggleAnalyticsExperimental(e.target.checked)}
-              />
-            <span className="switch-track">
-              <span className="switch-thumb" />
-            </span>
-          </label>
-        </div>
-
-        <div className="settings-row">
-          <div>
-            <div className="settings-title">Export folder path</div>
-            <div className="muted">All exported ledger pdfs and xlsx are saved here.</div>
-          </div>
-          <div style={{ display: 'grid', gap: 8, minWidth: 280, maxWidth: 420, width: '100%' }}>
-            <div
-              className="input-field"
-              style={{ display: 'flex', alignItems: 'center', minHeight: 42, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-              title={exportFolderPath || 'No folder selected'}
-              >
-              {exportFolderPath || 'No folder selected'}
-            </div>
-            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-              <button type="button" className="btn btn-ghost" onClick={onChooseExportFolder}>Choose folder</button>
-              <button type="button" className="btn btn-ghost" onClick={onClearExportFolder}>Clear</button>
-            </div>
           </div>
         </div>
       </div>

@@ -1,5 +1,6 @@
+import { useEffect, useRef } from 'react';
 import Icon from '../shared/Icon';
-import type { MenuItem } from '../../types';
+import type { Addon, MenuItem } from '../../types';
 import { formatCurrency } from '../../utils/currencyUtils';
 
 interface InventoryTabProps {
@@ -9,14 +10,17 @@ interface InventoryTabProps {
   menuSearch: string;
   addNewOpen: boolean;
   menuGroups: Map<string, MenuItem[]>;
-  collapsedMenuCategories: Set<string>;
+  expandedMenuCategories: Set<string>;
+  expandedAddonGroups: Set<string>;
   inlineEditingId: string | null;
   inlineName: string;
   onMenuSearchChange: (value: string) => void;
   onToggleAddNew: () => void;
   onOpenAddCategory: () => void;
   onOpenMenuDrawer: (item?: MenuItem | null, category?: string) => void;
+  onOpenAddonDrawer: (addon?: Addon & { parentItemId: string }, parentItemId?: string) => void;
   onToggleMenuCategory: (category: string) => void;
+  onToggleAddonGroup: (itemId: string) => void;
   onOpenEditCategory: (name: string) => void;
   onSetDeleteCategoryTarget: (name: string) => void;
   onStartInlineEdit: (item: MenuItem) => void;
@@ -25,6 +29,7 @@ interface InventoryTabProps {
   onCancelInlineEdit: () => void;
   onToggleMenuActive: (item: MenuItem) => void;
   onSetDeleteMenuItem: (item: MenuItem) => void;
+  onRemoveAddon: (itemId: string, addonId: string) => void;
 }
 
 export default function InventoryTab({
@@ -34,14 +39,17 @@ export default function InventoryTab({
   menuSearch,
   addNewOpen,
   menuGroups,
-  collapsedMenuCategories,
+  expandedMenuCategories,
+  expandedAddonGroups,
   inlineEditingId,
   inlineName,
   onMenuSearchChange,
   onToggleAddNew,
   onOpenAddCategory,
   onOpenMenuDrawer,
+  onOpenAddonDrawer,
   onToggleMenuCategory,
+  onToggleAddonGroup,
   onOpenEditCategory,
   onSetDeleteCategoryTarget,
   onStartInlineEdit,
@@ -50,7 +58,25 @@ export default function InventoryTab({
   onCancelInlineEdit,
   onToggleMenuActive,
   onSetDeleteMenuItem,
+  onRemoveAddon,
 }: InventoryTabProps) {
+  // Collect items that have at least one add-on for the Add-ons section
+  const itemsWithAddons = menuItems.filter(item => item.addons && item.addons.length > 0);
+  const totalAddons = itemsWithAddons.reduce((sum, item) => sum + (item.addons?.length ?? 0), 0);
+
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!addNewOpen) return;
+    const handleClickOutside = (event: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        onToggleAddNew();
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [addNewOpen, onToggleAddNew]);
+
   return (
     <div className="menu-ops-shell">
       <div className="menu-ops-header">
@@ -58,12 +84,13 @@ export default function InventoryTab({
           <h2>Inventory</h2>
           <div className="menu-ops-meta">{menuItems.length} items · {visibleMenuGroupCount} active groups</div>
         </div>
-        <div className="menu-add-wrap">
+        <div className="menu-add-wrap" ref={dropdownRef}>
           <button className="menu-add-new" onClick={onToggleAddNew}>+ Add New</button>
           {addNewOpen && (
             <div className="menu-add-dropdown">
               <button type="button" onClick={() => { onToggleAddNew(); onOpenAddCategory(); }}>Category</button>
-              <button type="button" onClick={() => onOpenMenuDrawer()}>Item</button>
+              <button type="button" onClick={() => { onToggleAddNew(); onOpenMenuDrawer(); }}>Item</button>
+              <button type="button" onClick={() => { onToggleAddNew(); onOpenAddonDrawer(); }}>Add-on</button>
             </div>
           )}
         </div>
@@ -99,8 +126,9 @@ export default function InventoryTab({
         </div>
       ) : (
         <div className="menu-ops-groups">
+          {/* ── Items grouped by category ── */}
           {Array.from(menuGroups.entries()).map(([category, items]) => {
-            const collapsed = collapsedMenuCategories.has(category);
+            const collapsed = !expandedMenuCategories.has(category);
 
             return (
               <section key={category} className="menu-ops-group">
@@ -158,6 +186,9 @@ export default function InventoryTab({
                           <span>
                             {formatCurrency(item.price)} · {active ? 'Available' : 'Disabled'}
                             {item.isNonProfit ? ' · Non-profit' : ''}
+                            {item.addons && item.addons.length > 0 && (
+                              <span className="addon-count-badge">{item.addons.length} add-on{item.addons.length !== 1 ? 's' : ''}</span>
+                            )}
                           </span>
                         </div>
                         <button type="button" className="menu-row-action" onClick={() => onOpenMenuDrawer(item)} title="Edit item">
@@ -179,6 +210,87 @@ export default function InventoryTab({
               </section>
             );
           })}
+
+          {/* ── Add-ons section ── */}
+          <section className="menu-ops-group addon-master-section">
+            <div className="menu-ops-group-title-row addon-section-header">
+              <div className="addon-section-label">
+                <div>ADD-ONS</div>
+                <div className="menu-ops-group-meta" style={{ marginLeft: 8 }}>
+                  {totalAddons} total · {itemsWithAddons.length} items
+                </div>
+              </div>
+            </div>
+
+            {itemsWithAddons.length === 0 ? (
+              <div className="orders-empty" style={{ padding: '16px 20px', fontSize: '0.85rem' }}>
+                No add-ons yet. Use <strong>+ Add New → Add-on</strong> to create one.
+              </div>
+            ) : (
+              <div className="addon-section-body">
+                {itemsWithAddons.map(item => {
+                  const addonGroupCollapsed = !expandedAddonGroups.has(item.id);
+                  return (
+                    <div key={item.id} className="addon-parent-group">
+                      <button
+                        type="button"
+                        className="addon-parent-title"
+                        onClick={() => onToggleAddonGroup(item.id)}
+                      >
+                        <span className="addon-parent-name">{item.name}</span>
+                        <span className="menu-ops-group-meta">
+                          <span className="addon-count">{item.addons!.length} add-on{item.addons!.length !== 1 ? 's' : ''}</span>
+                          <span className={`menu-ops-group-arrow${addonGroupCollapsed ? ' collapsed' : ''}`}>
+                            <Icon name="down" size={13} />
+                          </span>
+                        </span>
+                      </button>
+                      {!addonGroupCollapsed && (
+                        <div className="addon-child-list">
+                          {item.addons!.map(addon => (
+                            <div key={addon.id} className="addon-inventory-row">
+                              <div className="addon-row-info">
+                                <span className="addon-row-name">{addon.name}</span>
+                                {addon.localizedNameHi && (
+                                  <span className="addon-row-hindi">{addon.localizedNameHi}</span>
+                                )}
+                                <span className="addon-row-price">
+                                  {addon.price > 0 ? `+${formatCurrency(addon.price)}` : 'Free'}
+                                </span>
+                              </div>
+                              <div style={{ display: 'flex', gap: 4 }}>
+                                <button
+                                  type="button"
+                                  className="menu-row-action"
+                                  title="Edit add-on"
+                                  onClick={() => onOpenAddonDrawer({ ...addon, parentItemId: item.id })}
+                                >
+                                  <Icon name="edit" size={14} />
+                                </button>
+                                <button
+                                  type="button"
+                                  className="menu-row-action danger"
+                                  title="Remove add-on"
+                                  onClick={() => onRemoveAddon(item.id, addon.id)}
+                                >
+                                  <Icon name="trash" size={14} />
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                          <div className="menu-group-actions">
+                            <button type="button" onClick={() => onOpenAddonDrawer(undefined, item.id)}>
+                              + More Add-ons
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
         </div>
       )}
     </div>

@@ -1,10 +1,17 @@
 // Updated types for cash/UPI payments
-export type PaymentMethod = 'Cash' | 'UPI' | 'Both' | 'Unpaid' | 'Split';
+export type PaymentMethod = 'Cash' | 'UPI' | 'Both' | 'Unpaid' | 'Split' | 'Cancelled';
 
 export type OrderType = 'Dine' | 'Takeaway' | 'Local Delivery' | 'Zomato' | 'Swiggy';
 export type OrderStatus = 'Open' | 'Completed' | 'Cancelled';
 
 export type MenuCategory = string;
+
+export interface Addon {
+  id: string;
+  name: string;
+  localizedNameHi?: string;
+  price: number; // extra charge; 0 = free/informational
+}
 
 export interface MenuItem {
   id: string;
@@ -16,7 +23,16 @@ export interface MenuItem {
   image?: string;
   isNonProfit?: boolean;
   isActive: boolean;
+  addons?: Addon[];
   createdAt: string;
+}
+
+export interface OrderItemAddon {
+  addonId: string;
+  name: string;
+  localizedNameHi?: string;
+  price: number;
+  qty: number; // how many of this add-on (default 1)
 }
 
 export interface SaleItem {
@@ -24,11 +40,18 @@ export interface SaleItem {
   name: string;
   qty: number;
   unitPrice: number;
+  addons?: OrderItemAddon[];
 }
 
 export interface OrderItem extends SaleItem {
   countsInSales: boolean;
   kotPrintedQty?: number;
+}
+
+
+export interface ExtraCharge {
+  label: string;
+  amount: number;
 }
 
 export interface Order {
@@ -46,6 +69,7 @@ export interface Order {
   createdAt: string;
   updatedAt: string;
   completedAt?: string;
+  extraCharges?: ExtraCharge[];
 }
 
 export interface Sale {
@@ -66,6 +90,7 @@ export interface Sale {
   upiAmount?: number;
   note?: string;
   createdAt: string;
+  extraCharges?: ExtraCharge[];
 }
 
 export interface DailyStat {

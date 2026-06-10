@@ -59,7 +59,7 @@ export default function DashboardTab({
               ) : (
                 recentSales.map(sale => (
                   <tr key={sale.id}>
-                    <td>#{sale.id.slice(-5).toUpperCase()}</td>
+                    <td>{sale.orderCode || `#${sale.id.slice(-5).toUpperCase()}`}</td>
                     <td>{sale.time}</td>
                     <td className="muted">{sale.items.map(item => `${item.qty}x ${item.name}`).join(', ') || 'Manual entry'}</td>
                     <td><span className={`pill ${sale.paymentMethod.toLowerCase()}`}>{sale.paymentMethod}</span></td>

@@ -7,7 +7,7 @@ import { useSalesStore } from './store/salesStore';
 import { useMenuStore } from './store/menuStore';
 import ManageOrders from './pages/ManageOrders';
 import mascot from './assets/aalsi-chatore-mascot.png';
-import type { MenuItem, Order, PaymentMethod, Sale, SaleItem } from './types';
+import type { Addon, MenuItem, Order, PaymentMethod, Sale, SaleItem } from './types';
 import { isTauri } from './utils/tauri';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { check } from '@tauri-apps/plugin-updater';
@@ -21,6 +21,7 @@ import { compressImageFile } from './utils/imageUtils';
 import AppSidebar from './components/app/AppSidebar';
 import DashboardTab from './components/app/DashboardTab';
 import MenuDrawer from './components/app/MenuDrawer';
+import AddonDrawer from './components/app/AddonDrawer';
 import AnalyticsTab from './components/app/AnalyticsTab';
 import InventoryTab from './components/app/InventoryTab';
 import LedgerTab from './components/app/LedgerTab';
@@ -102,10 +103,12 @@ export default function App() {
   const [editCategoryTarget, setEditCategoryTarget] = useState<string | null>(null);
   const [editCategoryName, setEditCategoryName] = useState('');
   const [deleteCategoryTarget, setDeleteCategoryTarget] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<TabKey>('dashboard');
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [activeTab, setActiveTab] = useState<TabKey>('orders');
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(
+    () => localStorage.getItem('sidebar_collapsed') === 'true'
+  );
   const [menuSearch, setMenuSearch] = useState('');
-  const [collapsedMenuCategories, setCollapsedMenuCategories] = useState<Set<string>>(new Set());
+  const [expandedMenuCategories, setExpandedMenuCategories] = useState<Set<string>>(new Set());
   const [addNewOpen, setAddNewOpen] = useState(false);
   const [menuDrawerOpen, setMenuDrawerOpen] = useState(false);
   const [drawerName, setDrawerName] = useState('');
@@ -117,6 +120,12 @@ export default function App() {
   const [drawerIsNonProfit, setDrawerIsNonProfit] = useState(false);
   const [drawerDisabled, setDrawerDisabled] = useState(false);
   const [drawerPrice, setDrawerPrice] = useState('');
+  const [drawerAddons, setDrawerAddons] = useState<Addon[]>([]);
+  // Addon drawer state
+  const [addonDrawerOpen, setAddonDrawerOpen] = useState(false);
+  const [editingAddon, setEditingAddon] = useState<(Addon & { parentItemId: string }) | null>(null);
+  const [addonDrawerDefaultParent, setAddonDrawerDefaultParent] = useState<string | undefined>(undefined);
+  const [expandedAddonGroups, setExpandedAddonGroups] = useState<Set<string>>(new Set());
   const [inlineEditingId, setInlineEditingId] = useState<string | null>(null);
   const [inlineName, setInlineName] = useState('');
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>('idle');
@@ -157,14 +166,17 @@ export default function App() {
   const addCategory = useMenuStore(s => s.addCategory);
   const renameCategory = useMenuStore(s => s.renameCategory);
   const removeCategoryFromStore = useMenuStore(s => s.removeCategory);
+  const addAddonToStore = useMenuStore(s => s.addAddon);
+  const updateAddonInStore = useMenuStore(s => s.updateAddon);
+  const removeAddonFromStore = useMenuStore(s => s.removeAddon);
   const menuCategories = useMenuStore(s => s.categories);
   const sales = useSalesStore(s => s.sales);
   const menuItems = useMenuStore(s => s.items);
-  const todaySales = useMemo(() => sales.filter(sale => sale.date === todayISO()), [sales]);
-  const yesterdaySales = useMemo(() => sales.filter(sale => sale.date === yesterdayISO()), [sales]);
+  const todaySales = useMemo(() => sales.filter(sale => sale.date === todayISO() && sale.paymentMethod !== 'Cancelled'), [sales]);
+  const yesterdaySales = useMemo(() => sales.filter(sale => sale.date === yesterdayISO() && sale.paymentMethod !== 'Cancelled'), [sales]);
   const topDishNames = useMemo(() => {
     const counts = new Map<string, number>();
-    sales.forEach(sale => {
+    todaySales.forEach(sale => {
       sale.items.forEach(item => {
         counts.set(item.name, (counts.get(item.name) ?? 0) + item.qty);
       });
@@ -174,10 +186,10 @@ export default function App() {
       .sort((left, right) => right[1] - left[1])
       .slice(0, 3)
       .map(([name]) => name);
-  }, [sales]);
+  }, [todaySales]);
   const recentSales = useMemo(
-    () => [...sales].sort((left, right) => `${right.date} ${right.time}`.localeCompare(`${left.date} ${left.time}`)).slice(0, 10),
-    [sales]
+    () => [...todaySales].sort((left, right) => `${right.date} ${right.time}`.localeCompare(`${left.date} ${left.time}`)).slice(0, 10),
+    [todaySales]
   );
   const ledgerRows = sales;
   const ledgerDate = ledgerDatePreset === 'Today' ? todayISO() : ledgerDatePreset === 'Yesterday' ? yesterdayISO() : ledgerCustomDate;
@@ -207,8 +219,8 @@ export default function App() {
 
   const analyticsData = useMemo<AnalyticsData>(() => {
     const { start, end } = rangeToDates(analyticsRange);
-    // filter sales between start..end inclusive
-    const sel = sales.filter(s => s.date >= start && s.date <= end);
+    // filter sales between start..end inclusive (excluding cancelled sales)
+    const sel = sales.filter(s => s.date >= start && s.date <= end && s.paymentMethod !== 'Cancelled');
 
     // Metrics (total, orders, top items, pie) are computed from the date range only
     const totalSales = sel.reduce((acc, s) => acc + (s.amount ?? 0), 0);
@@ -285,9 +297,9 @@ export default function App() {
   };
   const closeLedgerMenu = () => setLedgerMenu(null);
 
-  const handleLedgerXlsxExport = async () => {
+  const handleLedgerXlsxExport = async (filteredRows?: Sale[]) => {
     try {
-      await exportSalesXLSXForDate(ledgerDate);
+      await exportSalesXLSXForDate(ledgerDate, filteredRows);
       showToast(`XLSX exported for ${ledgerDate}`, 'success');
     } catch (error) {
       console.warn('XLSX export failed', error);
@@ -295,9 +307,9 @@ export default function App() {
     }
   };
 
-  const handleLedgerPdfExport = async () => {
+  const handleLedgerPdfExport = async (filteredRows?: Sale[]) => {
     try {
-      await exportSalesPDFForDate(ledgerDate);
+      await exportSalesPDFForDate(ledgerDate, filteredRows);
       showToast(`PDF downloaded for ${ledgerDate}`, 'success');
     } catch (error) {
       console.warn('PDF export failed', error);
@@ -409,7 +421,7 @@ export default function App() {
       }
       updates = { amount };
     } else if (ledgerEdit.field === 'paymentMethod') {
-      const allowed: PaymentMethod[] = ['Cash', 'UPI', 'Both', 'Unpaid'];
+      const allowed: PaymentMethod[] = ['Cash', 'UPI', 'Both', 'Unpaid', 'Cancelled'];
       if (!allowed.includes(nextValue as PaymentMethod)) {
         showToast('Select a valid payment method', 'error');
         return;
@@ -504,6 +516,31 @@ export default function App() {
   }, [testingMode, loadSales, loadMenu]);
 
   useEffect(() => {
+    const trimmed = drawerName.trim();
+    if (!trimmed) {
+      if (!drawerHindiEdited) {
+        setDrawerHindiName('');
+      }
+      return;
+    }
+
+    if (drawerHindiEdited && drawerHindiName.trim() !== '') {
+      return;
+    }
+
+    const delayDebounceFn = setTimeout(() => {
+      void (async () => {
+        const suggestion = await suggestHindiName(trimmed);
+        if (suggestion) {
+          setDrawerHindiName(suggestion);
+        }
+      })();
+    }, 450);
+
+    return () => clearTimeout(delayDebounceFn);
+  }, [drawerName, drawerHindiEdited, drawerHindiName]);
+
+  useEffect(() => {
     let mounted = true;
     (async () => {
       try {
@@ -522,7 +559,7 @@ export default function App() {
   const openMenuDrawer = (item?: MenuItem | null, category?: string) => {
     setEditingMenuItem(item ?? null);
     setDrawerName(item?.name ?? '');
-    setDrawerHindiName(item?.localizedNameHi ?? suggestHindiName(item?.name ?? ''));
+    setDrawerHindiName(item?.localizedNameHi ?? '');
     setDrawerHindiEdited(Boolean(item?.localizedNameHi));
     setDrawerCategory(item?.category ?? category ?? menuCategories[0] ?? '');
     setDrawerDescription(item?.description ?? '');
@@ -530,6 +567,7 @@ export default function App() {
     setDrawerIsNonProfit(Boolean(item?.isNonProfit));
     setDrawerDisabled(item ? item.isActive === false : false);
     setDrawerPrice(item ? String(item.price) : '');
+    setDrawerAddons(item?.addons ?? []);
     setAddNewOpen(false);
     setMenuDrawerOpen(true);
   };
@@ -537,6 +575,16 @@ export default function App() {
   const closeMenuDrawer = () => {
     setMenuDrawerOpen(false);
     setEditingMenuItem(null);
+    setDrawerName('');
+    setDrawerHindiName('');
+    setDrawerHindiEdited(false);
+    setDrawerCategory('');
+    setDrawerDescription('');
+    setDrawerImage('');
+    setDrawerIsNonProfit(false);
+    setDrawerDisabled(false);
+    setDrawerPrice('');
+    setDrawerAddons([]);
   };
 
   const submitMenuDrawer = async () => {
@@ -547,10 +595,7 @@ export default function App() {
       showToast('Name, category, and price are required', 'error');
       return;
     }
-    let nextHindiName = drawerHindiName.trim();
-    if (!nextHindiName) {
-      nextHindiName = suggestHindiName(trimmedName);
-    }
+    const nextHindiName = drawerHindiName.trim();
 
     if (editingMenuItem) {
       updateMenu(editingMenuItem.id, {
@@ -562,6 +607,7 @@ export default function App() {
         image: drawerImage || undefined,
         isNonProfit: drawerIsNonProfit,
         isActive: !drawerDisabled,
+        addons: drawerAddons.length > 0 ? drawerAddons : undefined,
       });
       showToast(`"${trimmedName}" updated`, 'success');
       closeMenuDrawer();
@@ -576,6 +622,8 @@ export default function App() {
       description: drawerDescription.trim() || undefined,
       image: drawerImage || undefined,
       isNonProfit: drawerIsNonProfit,
+      isActive: !drawerDisabled,
+      addons: drawerAddons.length > 0 ? drawerAddons : undefined,
     });
     showToast(`"${trimmedName}" added`, 'success');
     closeMenuDrawer();
@@ -594,8 +642,46 @@ export default function App() {
     })();
   };
 
+  const openAddonDrawer = (addon?: Addon & { parentItemId: string }, parentItemId?: string) => {
+    setEditingAddon(addon ?? null);
+    setAddonDrawerDefaultParent(parentItemId);
+    setAddonDrawerOpen(true);
+  };
+
+  const closeAddonDrawer = () => {
+    setAddonDrawerOpen(false);
+    setEditingAddon(null);
+    setAddonDrawerDefaultParent(undefined);
+  };
+
+  const submitAddonDrawer = (parentItemId: string, data: Omit<Addon, 'id'>) => {
+    if (editingAddon) {
+      // If parent changed, remove from old item, add to new
+      if (editingAddon.parentItemId !== parentItemId) {
+        removeAddonFromStore(editingAddon.parentItemId, editingAddon.id);
+        addAddonToStore(parentItemId, data);
+      } else {
+        updateAddonInStore(parentItemId, editingAddon.id, data);
+      }
+      showToast(`"${data.name}" updated`, 'success');
+    } else {
+      addAddonToStore(parentItemId, data);
+      showToast(`"${data.name}" add-on added`, 'success');
+    }
+    closeAddonDrawer();
+  };
+
+  const toggleAddonGroup = (itemId: string) => {
+    setExpandedAddonGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(itemId)) next.delete(itemId);
+      else next.add(itemId);
+      return next;
+    });
+  };
+
   const toggleMenuCategory = (category: string) => {
-    setCollapsedMenuCategories(prev => {
+    setExpandedMenuCategories(prev => {
       const next = new Set(prev);
       if (next.has(category)) next.delete(category);
       else next.add(category);
@@ -631,6 +717,16 @@ export default function App() {
     showToast(active ? `"${item.name}" disabled` : `"${item.name}" enabled`, 'info');
   };
 
+  const closeAddCategoryModal = () => {
+    setAddCategoryOpen(false);
+    setNewCategoryName('');
+  };
+
+  const closeEditCategoryModal = () => {
+    setEditCategoryTarget(null);
+    setEditCategoryName('');
+  };
+
   const handleAddCategory = () => {
     const trimmed = newCategoryName.trim();
     if (!trimmed) {
@@ -644,8 +740,7 @@ export default function App() {
     }
     addCategory(trimmed);
     showToast(`"${trimmed}" added`, 'success');
-    setNewCategoryName('');
-    setAddCategoryOpen(false);
+    closeAddCategoryModal();
   };
 
   const openEditCategory = (name: string) => {
@@ -657,11 +752,11 @@ export default function App() {
     if (!editCategoryTarget) return;
     const trimmed = editCategoryName.trim();
     if (!trimmed) { showToast('Enter a category name', 'error'); return; }
-    if (trimmed === editCategoryTarget) { setEditCategoryTarget(null); return; }
+    if (trimmed === editCategoryTarget) { closeEditCategoryModal(); return; }
     try {
       await renameCategory(editCategoryTarget, trimmed);
       showToast(`"${editCategoryTarget}" renamed to "${trimmed}"`, 'success');
-      setEditCategoryTarget(null);
+      closeEditCategoryModal();
     } catch (err: unknown) {
       showToast(err instanceof Error ? err.message : 'Rename failed', 'error');
     }
@@ -725,18 +820,18 @@ export default function App() {
   );
 
   const tabs: TabConfig[] = [
-    { key: 'dashboard', label: 'Dashboard', icon: 'chart' },
     { key: 'orders', label: 'Manage Orders', icon: 'receipt' },
     { key: 'ledger', label: 'Sales Ledger', icon: 'list' },
     // Analytics tab is experimental and can be disabled in settings
     ...(analyticsExperimentalEnabled ? [{ key: 'analytics' as TabKey, label: 'Analytics', icon: 'trophy' as const }] : []),
+    { key: 'insights', label: 'Insights', icon: 'chart' },
     { key: 'inventory', label: 'Menu Items', icon: 'bowl' as const },
   ];
 
   // ensure we don't stay on analytics tab when it's disabled
   useEffect(() => {
     if (!analyticsExperimentalEnabled && activeTab === 'analytics') {
-      setActiveTab('dashboard');
+      setActiveTab('orders');
     }
   }, [analyticsExperimentalEnabled, activeTab]);
 
@@ -751,7 +846,11 @@ export default function App() {
         restaurantName={APP_CONFIG.restaurantName}
         restaurantTagline={APP_CONFIG.restaurantTagline}
         mascotSrc={mascot}
-        onToggleSidebar={() => setSidebarCollapsed(prev => !prev)}
+        onToggleSidebar={() => setSidebarCollapsed(prev => {
+          const next = !prev;
+          localStorage.setItem('sidebar_collapsed', String(next));
+          return next;
+        })}
         onSelectTab={setActiveTab}
         onOpenUpdates={() => setActiveTab('updates')}
         onOpenSettings={() => setActiveTab('settings')}
@@ -759,16 +858,6 @@ export default function App() {
 
       <main className="main-content">
         <section className="page">
-          {activeTab === 'dashboard' && (
-            <DashboardTab
-              todaySales={todaySales}
-              yesterdaySales={yesterdaySales}
-              topDishNames={topDishNames}
-              recentSales={recentSales}
-              onViewLedger={() => setActiveTab('ledger')}
-            />
-          )}
-
           {activeTab === 'orders' && (
             <ManageOrders
               onNewOrder={openNewOrderForm}
@@ -787,8 +876,8 @@ export default function App() {
               ledgerMenu={ledgerMenu}
               onLedgerDatePresetChange={setLedgerDatePreset}
               onLedgerCustomDateChange={setLedgerCustomDate}
-              onExportXlsx={() => void handleLedgerXlsxExport()}
-              onExportPdf={() => void handleLedgerPdfExport()}
+              onExportXlsx={(rows) => void handleLedgerXlsxExport(rows)}
+              onExportPdf={(rows) => void handleLedgerPdfExport(rows)}
               onStartLedgerEdit={startLedgerEdit}
               onLedgerEditChange={setLedgerEdit}
               onSaveLedgerEdit={saveLedgerEdit}
@@ -815,6 +904,16 @@ export default function App() {
             />
           )}
 
+          {activeTab === 'insights' && (
+            <DashboardTab
+              todaySales={todaySales}
+              yesterdaySales={yesterdaySales}
+              topDishNames={topDishNames}
+              recentSales={recentSales}
+              onViewLedger={() => setActiveTab('ledger')}
+            />
+          )}
+
           {activeTab === 'inventory' && (
             <InventoryTab
               menuItems={menuItems}
@@ -823,14 +922,17 @@ export default function App() {
               menuSearch={menuSearch}
               addNewOpen={addNewOpen}
               menuGroups={menuGroups}
-              collapsedMenuCategories={collapsedMenuCategories}
+              expandedMenuCategories={expandedMenuCategories}
+              expandedAddonGroups={expandedAddonGroups}
               inlineEditingId={inlineEditingId}
               inlineName={inlineName}
               onMenuSearchChange={setMenuSearch}
               onToggleAddNew={() => setAddNewOpen(prev => !prev)}
               onOpenAddCategory={() => setAddCategoryOpen(true)}
               onOpenMenuDrawer={(item, category) => openMenuDrawer(item ?? null, category)}
+              onOpenAddonDrawer={openAddonDrawer}
               onToggleMenuCategory={toggleMenuCategory}
+              onToggleAddonGroup={toggleAddonGroup}
               onOpenEditCategory={openEditCategory}
               onSetDeleteCategoryTarget={setDeleteCategoryTarget}
               onStartInlineEdit={startInlineEdit}
@@ -839,6 +941,7 @@ export default function App() {
               onCancelInlineEdit={() => { setInlineEditingId(null); setInlineName(''); }}
               onToggleMenuActive={toggleMenuActive}
               onSetDeleteMenuItem={setDeleteMenuItem}
+              onRemoveAddon={(itemId, addonId) => removeAddonFromStore(itemId, addonId)}
             />
           )}
 
@@ -882,23 +985,25 @@ export default function App() {
         isOpen={addOrderOpen}
         onClose={closeOrderForm}
       >
-        <AddOrderForm
-          key={orderFormOrder?.id ?? 'new-order'}
-          order={orderFormOrder ?? undefined}
-          onClose={closeOrderForm}
-          onSaved={() => {
-            if (orderFormOrder) {
-              setActiveTab('orders');
-            }
-          }}
-        />
+        {addOrderOpen && (
+          <AddOrderForm
+            key={orderFormOrder?.id ?? 'new-order'}
+            order={orderFormOrder ?? undefined}
+            onClose={closeOrderForm}
+            onSaved={() => {
+              if (orderFormOrder) {
+                setActiveTab('orders');
+              }
+            }}
+          />
+        )}
       </Modal>
 
       <Modal
         id="add-category-modal"
         title="Add Category"
         isOpen={addCategoryOpen}
-        onClose={() => setAddCategoryOpen(false)}
+        onClose={closeAddCategoryModal}
         size="sm"
       >
         <div className="modal-body">
@@ -915,7 +1020,7 @@ export default function App() {
           </div>
         </div>
         <div className="modal-actions" style={{ padding: '0 24px 24px' }}>
-          <button className="btn btn-ghost" onClick={() => setAddCategoryOpen(false)}>Cancel</button>
+          <button className="btn btn-ghost" onClick={closeAddCategoryModal}>Cancel</button>
           <button className="btn btn-primary" onClick={handleAddCategory}>Add Category</button>
         </div>
       </Modal>
@@ -941,7 +1046,7 @@ export default function App() {
         id="edit-category-modal"
         title="Rename Category"
         isOpen={!!editCategoryTarget}
-        onClose={() => setEditCategoryTarget(null)}
+        onClose={closeEditCategoryModal}
         size="sm"
       >
         <div className="modal-body">
@@ -959,7 +1064,7 @@ export default function App() {
           </div>
         </div>
         <div className="modal-actions" style={{ padding: '0 24px 24px' }}>
-          <button className="btn btn-ghost" onClick={() => setEditCategoryTarget(null)}>Cancel</button>
+          <button className="btn btn-ghost" onClick={closeEditCategoryModal}>Cancel</button>
           <button className="btn btn-primary" onClick={() => void handleRenameCategory()}>Save</button>
         </div>
       </Modal>
@@ -1001,14 +1106,13 @@ export default function App() {
         drawerIsNonProfit={drawerIsNonProfit}
         drawerDisabled={drawerDisabled}
         drawerPrice={drawerPrice}
+        drawerAddons={drawerAddons}
         onClose={closeMenuDrawer}
         onSubmit={submitMenuDrawer}
         onNameChange={(next: string) => {
-          const prevAuto = suggestHindiName(drawerName);
-          const nextAuto = suggestHindiName(next);
           setDrawerName(next);
-          if (!drawerHindiEdited || !drawerHindiName.trim() || drawerHindiName === prevAuto) {
-            setDrawerHindiName(nextAuto);
+          if (!next.trim()) {
+            setDrawerHindiName('');
             setDrawerHindiEdited(false);
           }
         }}
@@ -1022,6 +1126,20 @@ export default function App() {
         onNonProfitChange={setDrawerIsNonProfit}
         onDisabledChange={setDrawerDisabled}
         onPriceChange={setDrawerPrice}
+      />
+
+      <div
+        className={`menu-drawer-backdrop${addonDrawerOpen ? ' open' : ''}`}
+        onClick={closeAddonDrawer}
+        aria-hidden={!addonDrawerOpen}
+      />
+      <AddonDrawer
+        isOpen={addonDrawerOpen}
+        editingAddon={editingAddon}
+        menuItems={menuItems}
+        defaultParentItemId={addonDrawerDefaultParent}
+        onClose={closeAddonDrawer}
+        onSubmit={submitAddonDrawer}
       />
 
       <Modal

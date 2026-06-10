@@ -1,6 +1,6 @@
 import type { IconName } from '../shared/Icon';
 
-export type TabKey = 'dashboard' | 'orders' | 'ledger' | 'analytics' | 'inventory' | 'updates' | 'settings';
+export type TabKey = 'insights' | 'orders' | 'ledger' | 'analytics' | 'inventory' | 'updates' | 'settings';
 export type UpdateStatus = 'idle' | 'checking' | 'available' | 'downloading' | 'updated' | 'error' | 'unsupported';
 
 export type LedgerMenuState = {

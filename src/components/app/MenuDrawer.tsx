@@ -1,5 +1,4 @@
-import { suggestHindiName } from '../../utils/hindi';
-import type { MenuItem } from '../../types';
+import type { Addon, MenuItem } from '../../types';
 import Icon from '../shared/Icon';
 
 interface MenuDrawerProps {
@@ -14,6 +13,7 @@ interface MenuDrawerProps {
   drawerIsNonProfit: boolean;
   drawerDisabled: boolean;
   drawerPrice: string;
+  drawerAddons: Addon[];
   onClose: () => void;
   onSubmit: () => void;
   onNameChange: (value: string) => void;
@@ -38,6 +38,7 @@ export default function MenuDrawer({
   drawerIsNonProfit,
   drawerDisabled,
   drawerPrice,
+  drawerAddons,
   onClose,
   onSubmit,
   onNameChange,
@@ -49,7 +50,7 @@ export default function MenuDrawer({
   onDisabledChange,
   onPriceChange,
 }: MenuDrawerProps) {
-  const placeholder = suggestHindiName(drawerName) || 'Auto-generated from item name';
+  const placeholder = 'Auto-generated from item name';
 
   return (
     <aside className={`menu-drawer${isOpen ? ' open' : ''}`} aria-label="Add Item">
@@ -132,6 +133,42 @@ export default function MenuDrawer({
             <input className="input-field" type="number" min="0" step="0.01" placeholder="0.00" value={drawerPrice} onChange={event => onPriceChange(event.target.value)} />
           </div>
         </section>
+
+        {/* ── Add-ons — read-only summary ── */}
+        {editingMenuItem && (
+          <section className="pricing-section">
+            <div className="pricing-header">
+              <div>
+                <h3>Add-ons</h3>
+                <small style={{ fontWeight: 400, opacity: 0.7 }}>Manage from the Inventory tab</small>
+              </div>
+              {drawerAddons.length > 0 && (
+                <span className="addon-count-badge" style={{ alignSelf: 'center' }}>
+                  {drawerAddons.length} attached
+                </span>
+              )}
+            </div>
+            {drawerAddons.length > 0 ? (
+              <div className="addon-list">
+                {drawerAddons.map(addon => (
+                  <div key={addon.id} className="addon-row addon-row-readonly">
+                    <div className="addon-row-info">
+                      <span className="addon-row-name">{addon.name}</span>
+                      {addon.localizedNameHi && <span className="addon-row-hindi">{addon.localizedNameHi}</span>}
+                      <span className="addon-row-price">
+                        {addon.price > 0 ? `+₹${addon.price}` : 'Free'}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p style={{ fontSize: '0.82rem', opacity: 0.55, margin: '6px 0 0' }}>
+                No add-ons attached. Use <strong>+ Add New → Add-on</strong> in the Inventory tab.
+              </p>
+            )}
+          </section>
+        )}
       </div>
 
       <div className="menu-drawer-footer">

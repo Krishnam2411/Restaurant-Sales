@@ -148,6 +148,7 @@ async function ensureSqlite(): Promise<void> {
           image TEXT,
           is_non_profit INTEGER NOT NULL DEFAULT 0,
           is_active INTEGER NOT NULL DEFAULT 1,
+          addons TEXT,
           created_at TEXT NOT NULL
         )`
       );
@@ -186,6 +187,7 @@ async function ensureSqlite(): Promise<void> {
           name TEXT NOT NULL,
           qty INTEGER NOT NULL,
           unit_price REAL NOT NULL,
+          addons TEXT,
           FOREIGN KEY (sale_id) REFERENCES sales(id)
         )`
       );
@@ -216,6 +218,7 @@ async function ensureSqlite(): Promise<void> {
           unit_price REAL NOT NULL,
           counts_in_sales INTEGER NOT NULL DEFAULT 1,
           kot_printed_qty INTEGER NOT NULL DEFAULT 0,
+          addons TEXT,
           FOREIGN KEY (order_id) REFERENCES orders(id)
         )`
       );
@@ -268,6 +271,7 @@ async function ensureSqlite(): Promise<void> {
       if (!sCols.includes('cash_amount')) await db.execute('ALTER TABLE sales ADD COLUMN cash_amount REAL');
       if (!sCols.includes('upi_amount')) await db.execute('ALTER TABLE sales ADD COLUMN upi_amount REAL');
       if (!sCols.includes('channel')) await db.execute("ALTER TABLE sales ADD COLUMN channel TEXT NOT NULL DEFAULT 'Takeaway'");
+      if (!sCols.includes('extra_charges')) await db.execute('ALTER TABLE sales ADD COLUMN extra_charges TEXT');
       // Ensure orders table has newer columns (for older DBs)
       const orderCols: Array<{ name: string }> = await db.select('PRAGMA table_info(orders)');
       const oCols = orderCols.map(c => c.name);
@@ -275,16 +279,28 @@ async function ensureSqlite(): Promise<void> {
       if (!oCols.includes('cash_amount')) await db.execute('ALTER TABLE orders ADD COLUMN cash_amount REAL');
       if (!oCols.includes('upi_amount')) await db.execute('ALTER TABLE orders ADD COLUMN upi_amount REAL');
       if (!oCols.includes('discount')) await db.execute('ALTER TABLE orders ADD COLUMN discount REAL NOT NULL DEFAULT 0');
+      if (!oCols.includes('extra_charges')) await db.execute('ALTER TABLE orders ADD COLUMN extra_charges TEXT');
       // Ensure order_items table has kot_printed_qty column for KOT tracking
       const orderItemsCols: Array<{ name: string }> = await db.select('PRAGMA table_info(order_items)');
-      const hasKotPrinted = orderItemsCols.some(col => col.name === 'kot_printed_qty');
-      if (!hasKotPrinted) {
+      const oiCols = orderItemsCols.map(c => c.name);
+      if (!oiCols.includes('kot_printed_qty')) {
         try {
           await db.execute('ALTER TABLE order_items ADD COLUMN kot_printed_qty INTEGER NOT NULL DEFAULT 0');
         } catch (err) {
-          // Some older SQLite builds may not allow ALTER TABLE ADD COLUMN with NOT NULL default; ignore if fails
           try { await db.execute('ALTER TABLE order_items ADD COLUMN kot_printed_qty INTEGER'); } catch (e) { /* ignore */ }
         }
+      }
+      if (!oiCols.includes('addons')) {
+        await db.execute('ALTER TABLE order_items ADD COLUMN addons TEXT');
+      }
+      // Ensure menu_items has addons column
+      if (!menuCols.some(col => col.name === 'addons')) {
+        await db.execute('ALTER TABLE menu_items ADD COLUMN addons TEXT');
+      }
+      // Ensure sale_items has addons column
+      const saleItemsCols: Array<{ name: string }> = await db.select('PRAGMA table_info(sale_items)');
+      if (!saleItemsCols.some(col => col.name === 'addons')) {
+        await db.execute('ALTER TABLE sale_items ADD COLUMN addons TEXT');
       }
     })();
   }
@@ -315,6 +331,7 @@ export async function dbGetSales(): Promise<Sale[]> {
     channel?: string | null;
     note: string | null;
     created_at: string;
+    extra_charges?: string | null;
   }>('SELECT * FROM sales ORDER BY date DESC, time DESC');
 
   const itemRows = await sqlite.select<{
@@ -324,6 +341,7 @@ export async function dbGetSales(): Promise<Sale[]> {
     name: string;
     qty: number;
     unit_price: number;
+    addons: string | null;
   }>('SELECT * FROM sale_items');
 
   const itemsBySale = new Map<string, SaleItem[]>();
@@ -334,6 +352,7 @@ export async function dbGetSales(): Promise<Sale[]> {
       name: row.name,
       qty: Number(row.qty),
       unitPrice: Number(row.unit_price),
+      addons: row.addons ? JSON.parse(row.addons) : undefined,
     });
     itemsBySale.set(row.sale_id, items);
   });
@@ -355,6 +374,7 @@ export async function dbGetSales(): Promise<Sale[]> {
     channel: (row.channel ?? undefined) as any,
     note: row.note ?? undefined,
     createdAt: row.created_at,
+    extraCharges: row.extra_charges ? JSON.parse(row.extra_charges) : undefined,
   }));
 }
 
@@ -375,14 +395,32 @@ export async function dbSaveSales(sales: Sale[]): Promise<void> {
     const taxAmount = sale.taxAmount ?? +(discountedSubtotal * (taxRate / 100));
     const totalAmount = sale.amount ?? +(discountedSubtotal + taxAmount);
     await sqlite.execute(
-      'INSERT INTO sales (id, order_code, date, time, subtotal, discount, tax_rate, tax_amount, total_amount, amount, payment_method, cash_amount, upi_amount, channel, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [sale.id, sale.orderCode ?? null, sale.date, sale.time, subtotal, discount, taxRate, taxAmount, totalAmount, totalAmount, sale.paymentMethod, sale.cashAmount ?? null, sale.upiAmount ?? null, sale.channel ?? 'Takeaway', sale.note ?? null, sale.createdAt]
+      'INSERT INTO sales (id, order_code, date, time, subtotal, discount, tax_rate, tax_amount, total_amount, amount, payment_method, cash_amount, upi_amount, channel, note, created_at, extra_charges) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [
+        sale.id,
+        sale.orderCode ?? null,
+        sale.date,
+        sale.time,
+        subtotal,
+        discount,
+        taxRate,
+        taxAmount,
+        totalAmount,
+        totalAmount,
+        sale.paymentMethod,
+        sale.cashAmount ?? null,
+        sale.upiAmount ?? null,
+        sale.channel ?? 'Takeaway',
+        sale.note ?? null,
+        sale.createdAt,
+        sale.extraCharges ? JSON.stringify(sale.extraCharges) : null
+      ]
     );
 
     for (const item of sale.items) {
       await sqlite.execute(
-        'INSERT INTO sale_items (id, sale_id, menu_item_id, name, qty, unit_price) VALUES (?, ?, ?, ?, ?, ?)',
-        [uuid(), sale.id, item.menuItemId ?? null, item.name, item.qty, item.unitPrice]
+        'INSERT INTO sale_items (id, sale_id, menu_item_id, name, qty, unit_price, addons) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [uuid(), sale.id, item.menuItemId ?? null, item.name, item.qty, item.unitPrice, item.addons ? JSON.stringify(item.addons) : null]
       );
     }
   }
@@ -431,17 +469,19 @@ export async function dbGetOrders(): Promise<Order[]> {
     created_at: string;
     updated_at: string;
     completed_at: string | null;
+    extra_charges?: string | null;
   }>('SELECT * FROM orders ORDER BY updated_at DESC, created_at DESC');
 
-      const itemRows = await sqlite.select<{
+  const itemRows = await sqlite.select<{
     id: string;
     order_id: string;
     menu_item_id: string | null;
     name: string;
     qty: number;
     unit_price: number;
-        counts_in_sales: number;
-        kot_printed_qty?: number | null;
+    counts_in_sales: number;
+    kot_printed_qty?: number | null;
+    addons: string | null;
   }>('SELECT * FROM order_items');
 
   const itemsByOrder = new Map<string, OrderItem[]>();
@@ -454,6 +494,7 @@ export async function dbGetOrders(): Promise<Order[]> {
       unitPrice: Number(row.unit_price),
       countsInSales: Number(row.counts_in_sales) !== 0,
       kotPrintedQty: row.kot_printed_qty == null ? undefined : Number(row.kot_printed_qty),
+      addons: row.addons ? JSON.parse(row.addons) : undefined,
     });
     itemsByOrder.set(row.order_id, items);
   });
@@ -473,6 +514,7 @@ export async function dbGetOrders(): Promise<Order[]> {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     completedAt: row.completed_at ?? undefined,
+    extraCharges: row.extra_charges ? JSON.parse(row.extra_charges) : undefined,
   }));
 }
 
@@ -486,15 +528,22 @@ export async function dbSaveOrders(orders: Order[]): Promise<void> {
   await sqlite.execute('DELETE FROM orders');
 
   for (const order of orders) {
+    const subtotal = order.items.reduce((sum, item) => {
+      const addonTotal = (item.addons ?? []).reduce((s, a) => s + (a.qty ?? 1) * a.price, 0);
+      return sum + item.qty * item.unitPrice + addonTotal;
+    }, 0);
+    const chargesSum = (order.extraCharges ?? []).reduce((s, c) => s + c.amount, 0);
+    const totalAmount = Math.max(0, subtotal + chargesSum - (order.discount ?? 0));
+
     await sqlite.execute(
-      'INSERT INTO orders (id, code, order_type, customer_name, status, amount, discount, payment_method, cash_amount, upi_amount, note, created_at, updated_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO orders (id, code, order_type, customer_name, status, amount, discount, payment_method, cash_amount, upi_amount, note, created_at, updated_at, completed_at, extra_charges) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       [
         order.id,
         order.code,
         order.type,
         order.customerName ?? null,
         order.status,
-        Math.max(0, order.items.reduce((sum, item) => sum + item.qty * item.unitPrice, 0) - (order.discount ?? 0)),
+        totalAmount,
         order.discount ?? 0,
         order.paymentMethod ?? null,
         order.cashAmount ?? null,
@@ -503,13 +552,14 @@ export async function dbSaveOrders(orders: Order[]): Promise<void> {
         order.createdAt,
         order.updatedAt,
         order.completedAt ?? null,
+        order.extraCharges ? JSON.stringify(order.extraCharges) : null,
       ]
     );
 
     for (const item of order.items) {
       await sqlite.execute(
-        'INSERT INTO order_items (id, order_id, menu_item_id, name, qty, unit_price, counts_in_sales, kot_printed_qty) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        [uuid(), order.id, item.menuItemId ?? null, item.name, item.qty, item.unitPrice, item.countsInSales ? 1 : 0, item.kotPrintedQty ?? 0]
+        'INSERT INTO order_items (id, order_id, menu_item_id, name, qty, unit_price, counts_in_sales, kot_printed_qty, addons) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [uuid(), order.id, item.menuItemId ?? null, item.name, item.qty, item.unitPrice, item.countsInSales ? 1 : 0, item.kotPrintedQty ?? 0, item.addons ? JSON.stringify(item.addons) : null]
       );
     }
   }
@@ -532,6 +582,7 @@ export async function dbGetMenuItems(): Promise<MenuItem[]> {
     image: string | null;
     is_non_profit: number | null;
     is_active: number | null;
+    addons: string | null;
     created_at: string;
   }>('SELECT * FROM menu_items');
 
@@ -545,6 +596,7 @@ export async function dbGetMenuItems(): Promise<MenuItem[]> {
     image: row.image ?? undefined,
     isNonProfit: row.is_non_profit == null ? false : Boolean(row.is_non_profit),
     isActive: row.is_active == null ? true : Boolean(row.is_active),
+    addons: row.addons ? JSON.parse(row.addons) : undefined,
     createdAt: row.created_at,
   }));
 }
@@ -568,7 +620,7 @@ export async function dbSaveMenuItems(items: MenuItem[]): Promise<void> {
   await sqlite.execute('DELETE FROM menu_items');
   for (const item of items) {
     await sqlite.execute(
-      'INSERT INTO menu_items (id, name, localized_name_hi, price, category, description, image, is_non_profit, is_active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO menu_items (id, name, localized_name_hi, price, category, description, image, is_non_profit, is_active, addons, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       [
         item.id,
         item.name,
@@ -579,6 +631,7 @@ export async function dbSaveMenuItems(items: MenuItem[]): Promise<void> {
         item.image ?? null,
         item.isNonProfit ? 1 : 0,
         item.isActive ? 1 : 0,
+        item.addons ? JSON.stringify(item.addons) : null,
         item.createdAt,
       ]
     );
