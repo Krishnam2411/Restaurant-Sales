@@ -32,7 +32,8 @@
 - [x] Bug: export failed for some reason.
 - [x] Styling and Responsiveness for smaller screen
 
-# v1.1.0
+# v1.1.2
+- [ ] Improve db use.
 - [ ] Fix forced full screen
 - [ ] Add Backup Option using internet sync should durable.
 - [ ] Improve State Management and Folder Structure, code quality and normal states of open/close etc.

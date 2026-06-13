@@ -1,4 +1,4 @@
-import { usePrinterSettings, SUPPORTED_PAPER_WIDTHS } from '../../hooks/usePrinterSettings';
+import { usePrinterSettings } from '../../hooks/usePrinterSettings';
 
 interface SettingsTabProps {
   testingMode: boolean;
@@ -22,7 +22,6 @@ function PrinterSettingsSection() {
     isLoading,
     error,
     setPrinter,
-    setPaperWidth,
     refreshPrinters,
   } = usePrinterSettings();
 
@@ -97,30 +96,6 @@ function PrinterSettingsSection() {
           >
             {isLoading ? 'Loading…' : '↻ Refresh printers'}
           </button>
-        </div>
-      </div>
-
-      {/* Paper width */}
-      <div className="settings-row">
-        <div>
-          <div className="settings-title">Paper Roll Width</div>
-          <div className="muted">Match this to your thermal paper roll size (default 80 mm).</div>
-        </div>
-
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          {SUPPORTED_PAPER_WIDTHS.map(w => (
-            <button
-              key={w}
-              type="button"
-              className={`btn ${settings.paperWidthMm === w ? 'btn-primary' : 'btn-ghost'}`}
-              disabled={isLoading}
-              onClick={() => void setPaperWidth(w)}
-              aria-pressed={settings.paperWidthMm === w}
-              id={`paper-width-${w}`}
-            >
-              {w} mm
-            </button>
-          ))}
         </div>
       </div>
 

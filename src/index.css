@@ -1409,20 +1409,36 @@ textarea {
   align-items: stretch;
 }
 
-#add-order-modal .record-order-sidebar,
 #add-order-modal .record-order-menu,
 #add-order-modal .record-order-summary {
   min-height: 0;
 }
 
+#add-order-modal .record-order-sidebar {
+  min-height: 0;
+  overflow-y: auto;
+  max-height: 100%;
+}
+
 #add-order-modal .record-order-menu {
-  grid-template-rows: auto minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+}
+
+#add-order-modal .record-order-grid {
+  flex: 1;
+  overflow: auto;
 }
 
 #add-order-modal .record-order-grid,
 #add-order-modal .record-order-categories,
 #add-order-modal .record-order-summary {
   max-height: none;
+  overflow: visible;
+}
+
+#add-order-modal .record-order-grid,
+#add-order-modal .record-order-summary {
   overflow: auto;
 }
 
@@ -1437,20 +1453,36 @@ textarea {
   align-items: stretch;
 }
 
-#edit-order-modal .record-order-sidebar,
 #edit-order-modal .record-order-menu,
 #edit-order-modal .record-order-summary {
   min-height: 0;
 }
 
+#edit-order-modal .record-order-sidebar {
+  min-height: 0;
+  overflow-y: auto;
+  max-height: 100%;
+}
+
 #edit-order-modal .record-order-menu {
-  grid-template-rows: auto minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+}
+
+#edit-order-modal .record-order-grid {
+  flex: 1;
+  overflow: auto;
 }
 
 #edit-order-modal .record-order-grid,
 #edit-order-modal .record-order-categories,
 #edit-order-modal .record-order-summary {
   max-height: none;
+  overflow: visible;
+}
+
+#edit-order-modal .record-order-grid,
+#edit-order-modal .record-order-summary {
   overflow: auto;
 }
 .confirm-body {
@@ -3039,13 +3071,13 @@ select.input-field {
 }
 
 .record-order-sidebar {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 12px;
   background: rgba(255, 250, 241, 0.9);
   border: 1px dashed var(--border);
   border-radius: var(--radius-md);
   padding: 12px;
-  height: fit-content;
 }
 
 .record-order-search {
@@ -3056,6 +3088,7 @@ select.input-field {
   border-radius: var(--radius-md);
   border: 1px dashed var(--border);
   background: #fffaf1;
+  flex-shrink: 0;
 }
 
 .record-order-search .input-field {
@@ -3069,9 +3102,18 @@ select.input-field {
 .record-order-categories {
   display: flex;
   flex-direction: column;
+  align-items: flex-start;
   gap: 8px;
-  max-height: 360px;
-  overflow: auto;
+  flex: 1;
+  overflow: visible;
+  width: 100%;
+}
+
+.record-order-categories .category-tab {
+  width: 100%;
+  text-align: left;
+  font-size: var(--font-xl);
+  border-radius: var(--radius-md);
 }
 
 .record-order-menu {
@@ -3080,7 +3122,8 @@ select.input-field {
   border: 1px dashed var(--border);
   border-radius: var(--radius-md);
   padding: 12px;
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 12px;
 }
 
@@ -3099,6 +3142,7 @@ select.input-field {
   max-height: 420px;
   overflow: auto;
   padding-right: 4px;
+  align-content: flex-start;
 }
 
 .record-order-summary {

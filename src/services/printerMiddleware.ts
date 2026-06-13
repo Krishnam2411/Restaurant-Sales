@@ -96,14 +96,53 @@ if (typeof window !== 'undefined') {
   void getLogoDataUri();
 }
 
+// ── Font caching and preloading ──
+let cachedBaloo2DataUri: string | null = null;
+let cachedNoto400DataUri: string | null = null;
+let cachedNoto700DataUri: string | null = null;
+
+async function getFontDataUri(path: string, cacheKey: 'baloo2' | 'noto400' | 'noto700'): Promise<string> {
+  if (cacheKey === 'baloo2' && cachedBaloo2DataUri) return cachedBaloo2DataUri;
+  if (cacheKey === 'noto400' && cachedNoto400DataUri) return cachedNoto400DataUri;
+  if (cacheKey === 'noto700' && cachedNoto700DataUri) return cachedNoto700DataUri;
+
+  try {
+    const res = await fetch(path);
+    if (!res.ok) throw new Error(`Failed to fetch font: ${res.status}`);
+    const blob = await res.blob();
+    return new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const result = reader.result as string;
+        if (cacheKey === 'baloo2') cachedBaloo2DataUri = result;
+        else if (cacheKey === 'noto400') cachedNoto400DataUri = result;
+        else if (cacheKey === 'noto700') cachedNoto700DataUri = result;
+        resolve(result);
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  } catch (err) {
+    console.warn(`[printerMiddleware] Failed to preload font ${path}, using fallback:`, err);
+    return path;
+  }
+}
+
+// Pre-fetch fonts at startup
+if (typeof window !== 'undefined') {
+  void getFontDataUri('/fonts/baloo-2-700.woff2', 'baloo2');
+  void getFontDataUri('/fonts/noto-sans-devanagari-400.woff2', 'noto400');
+  void getFontDataUri('/fonts/noto-sans-devanagari-700.woff2', 'noto700');
+}
+
 // ---------------------------------------------------------------------------
 // Bill HTML Template
 // ---------------------------------------------------------------------------
 
 export function buildBillHtml(
   document: PrintableDocument,
-  paperWidthMm: number = 80,
 ): string {
+  const paperWidthMm = 80;
   const linesHtml = document.lines
     .map(
       (line) => {
@@ -124,13 +163,17 @@ export function buildBillHtml(
     .join("");
 
   const chargesHtml = (document.extraCharges ?? [])
-    .map(c => `<div class="total-row"><span>${escapeHtml(c.label)}</span>+ ${escapeHtml(formatCurrency(c.amount))}</div>`)
+    .map(c => `<div class="total-row"><span>${escapeHtml(c.label)}</span><span>+ ${escapeHtml(formatCurrency(c.amount))}</span></div>`)
     .join('');
 
   const discountHtml =
     document.discount && document.discount > 0
-      ? `<div class="total-row"><span>Discount</span>- ${escapeHtml(formatCurrency(document.discount))}</div>`
+      ? `<div class="total-row"><span>Discount</span><span>- ${escapeHtml(formatCurrency(document.discount))}</span></div>`
       : "";
+
+  const noteHtml = document.note?.trim()
+    ? `<div class="note"><strong>Note:</strong> ${escapeHtml(document.note.trim())}</div>`
+    : "";
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -140,175 +183,256 @@ export function buildBillHtml(
     <title>${escapeHtml(document.title)}</title>
     <style>
       @font-face {
+        font-family: 'Baloo 2';
+        font-style: normal;
+        font-weight: 700;
+        font-display: swap;
+        src: url('${cachedBaloo2DataUri || "/fonts/baloo-2-700.woff2"}') format('woff2');
+      }
+      @font-face {
         font-family: 'Noto Sans Devanagari';
         font-style: normal;
         font-weight: 400;
         font-display: swap;
-        src: url('/fonts/noto-sans-devanagari-400.woff2') format('woff2');
+        src: url('${cachedNoto400DataUri || "/fonts/noto-sans-devanagari-400.woff2"}') format('woff2');
       }
       @font-face {
         font-family: 'Noto Sans Devanagari';
         font-style: normal;
         font-weight: 700;
         font-display: swap;
-        src: url('/fonts/noto-sans-devanagari-700.woff2') format('woff2');
+        src: url('${cachedNoto700DataUri || "/fonts/noto-sans-devanagari-700.woff2"}') format('woff2');
       }
 
-      :root { color-scheme: light; --paper: ${paperWidthMm}mm; }
-      * { box-sizing: border-box; }
+      * { box-sizing: border-box; margin: 0; padding: 0; }
 
       @page {
-        size: var(--paper) auto;
+        size: ${paperWidthMm}mm auto;
         margin: 0;
       }
 
       html, body {
-        width: 80mm;
-        zoom: calc(${paperWidthMm} / 80);
-        margin: 0;
-        padding: 0;
+        width: ${paperWidthMm}mm;
         background: #fff;
+        color: #000;
       }
 
       body {
-        font-family: 'Noto Sans Devanagari', 'Segoe UI', system-ui, sans-serif;
-        color: #111;
-        padding: 8px 10px 16px;
+        font-family: 'Noto Sans Devanagari', 'Segoe UI', Arial, sans-serif;
+        font-size: 10pt;
+        padding: 6pt 8pt 16pt;
       }
 
-      .receipt { width: 100%; }
-
-      .flex-center {
-        display:flex;
-        justify-content: center;
+      /* ── Header ── */
+      .header {
+        display: flex;
         align-items: center;
-        margin: 10px 20px;
-      }
-      .flex-between {
-        display:flex;
-        justify-content: space-between;
-        align-items: center;
-        margin: 0px 20px;
-        gap: 10px;
-      }
-
-      /* Brand */
-      .brand {
-        margin-bottom: 4px;
+        padding-top: 2pt;
+        padding-bottom: 5pt;
+        width: 100%;
       }
       .logo {
-        display: block;
-        margin: 0 auto 4px;
-        max-width: 48px;
-        max-height: 48px;
+        flex-shrink: 0;
+        width: 48pt;
+        height: 48pt;
         object-fit: contain;
-        filter: grayscale(100%);
+        filter: grayscale(1) contrast(1.4);
+      }
+      .header-text {
+        width: fit-content;
+        flex: 1;
+        text-align: left;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+      }
+      /* Fallback if logo is missing */
+      .header:not(:has(.logo)) {
+        display: block;
+        text-align: center;
+      }
+      .header:not(:has(.logo)) .header-text {
+        text-align: center;
       }
       .brand-name {
-        font-size: 20px;
-        font-weight: 900;
-        letter-spacing: 0.12em;
-        padding: 1px 8px;
+        font-family: 'Baloo 2', 'Noto Sans Devanagari', 'Segoe UI', Arial, sans-serif;
+        font-size: 22.5pt;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        line-height: 1.15;
       }
       .brand-tagline {
-        font-size: 14px;
+        font-size: 12pt;
         font-weight: 600;
-        letter-spacing: 0.12em;
-        padding: 1px 8px;
+        letter-spacing: 0.04em;
+        margin-top: 2pt;
       }
-      .address { font-size: 11px; padding: 0px 4px; }
-      .contact { font-size: 13px; font-weight: 600; }
-
-      /* Meta */
-      .meta {
-        font-size: 12px;
-        display: grid;
-        gap: 2px;
-        margin-bottom: 8px;
+      .header-contact {
+        text-align: center;
+        margin-top: 2pt;
+      }
+      .address {
+        font-size: 9pt;
+        margin-top: 2pt;
+        line-height: 1.3;
+      }
+      .contact {
+        font-size: 10pt;
+        font-weight: 700;
+        margin-top: 2pt;
       }
 
-      /* Items */
+      /* ── Dividers ── */
       .divider {
-        margin: 25px 0;
-        border-bottom: 2px dashed #111;
+        border: none;
+        border-top: 1pt dashed #000;
+        margin: 6pt 0;
+      }
+      .divider-thin {
+        border: none;
+        border-top: 0.5pt solid #000;
+        margin: 4pt 0;
       }
 
+      /* ── Receipt label ── */
+      .receipt-label {
+        text-align: center;
+        font-size: 11pt;
+        font-weight: 900;
+        letter-spacing: 0.15em;
+        margin-bottom: 4pt;
+      }
+
+      /* ── Order meta ── */
+      .meta {
+        font-size: 10pt;
+        line-height: 1.5;
+      }
+      .meta table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      .meta td { vertical-align: top; }
+      .meta td.label { white-space: nowrap; padding-right: 20pt; font-weight: 600; }
+      .meta td.value { width: 100%; }
+
+      /* ── Items column header ── */
+      .col-header {
+        display: flex;
+        justify-content: space-between;
+        font-size: 9.5pt;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        padding: 3pt 0;
+      }
+
+      /* ── Line items ── */
       .line {
-        padding: 5px 0;
-        border-bottom: 1px dotted #ccc;
+        padding: 3.5pt 0;
       }
       .line-main {
         display: flex;
         align-items: flex-start;
         justify-content: space-between;
-        gap: 6px;
+        gap: 6pt;
       }
-      .item-name  { font-size: 15px; font-weight: 500; flex: 1; }
-      .line-total { font-size: 14px; font-weight: 600; white-space: nowrap; }
-      .line-meta  { font-size: 12px; color: #555; margin-top: 1px; }
-      .addon-line { font-size: 11px; color: #555; padding-left: 10px; margin-top: 2px; }
-      .addon-price { font-weight: 600; color: #333; }
-      .addon-free  { color: #888; }
+      .item-name  { font-size: 11pt; font-weight: 600; flex: 1; line-height: 1.3; }
+      .line-total { font-size: 11pt; font-weight: 700; white-space: nowrap; }
+      .line-meta  { font-size: 9.5pt; margin-top: 1pt; }
+      .addon-line { font-size: 9pt; padding-left: 8pt; margin-top: 1pt; }
+      .addon-price { font-weight: 700; }
 
-      /* Totals */
-      .totals {
-        margin-top: 8px;
-        padding-top: 6px;
-        display: grid;
-        gap: 3px;
+      /* ── Totals ── */
+      .totals { font-size: 10pt; margin-top: 3pt; }
+      .total-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 8pt;
+        padding: 2pt 0;
       }
-      .total-row { display: flex; justify-content: space-between; gap: 10px; font-size: 14px; }
-      .total-grand { font-size: 16px; font-weight: 700; }
+      .total-grand { font-size: 13pt; font-weight: 900; padding: 4pt 0; }
 
-      /* Footer */
+      /* ── Note ── */
+      .note { font-size: 9.5pt; margin: 4pt 0; line-height: 1.4; }
+
+      /* ── Footer ── */
       .footer {
-        margin-top: 25px;
         text-align: center;
-        font-size: 17px;
+        padding-top: 6pt;
+        font-size: 14pt;
+        font-weight: 900;
+        line-height: 1.4;
       }
-      .footer .thank-you { font-weight: 700; font-size: 16px; }
+      .footer-sub {
+        font-size: 11pt;
+        font-weight: 700;
+        margin-top: 3pt;
+      }
     </style>
   </head>
   <body>
-    <div class="receipt">
-      <div class="brand">
-        <div class="flex-center">
-          <div><img class="logo" src="${escapeHtml(document.logoUrl || '/outlined-logo.png')}" alt="Logo" /></div>
-          <div>
-            <div class="brand-name">${escapeHtml(APP_CONFIG.restaurantName)}</div>
-            <div class="brand-tagline">${escapeHtml(APP_CONFIG.restaurantTagline)}</div>
-          </div>
-        </div>
-        <div class="flex-between address">${escapeHtml(APP_CONFIG.restaurantAddress)}</div>
-        <div class="flex-center contact">Phone: ${escapeHtml(APP_CONFIG.contactNumber)}</div>
+    <!-- HEADER -->
+    <div class="header">
+      ${document.logoUrl ? `<img class="logo" src="${escapeHtml(document.logoUrl)}" alt="${escapeHtml(APP_CONFIG.restaurantName)}" />` : ''}
+      <div class="header-text">
+        <div class="brand-name">${escapeHtml(APP_CONFIG.restaurantName)}</div>
+        ${APP_CONFIG.restaurantTagline ? `<div class="brand-tagline">${escapeHtml(APP_CONFIG.restaurantTagline)}</div>` : ''}
       </div>
+    </div>
+    ${APP_CONFIG.restaurantAddress || APP_CONFIG.contactNumber ? `
+    <div class="header-contact">
+      ${APP_CONFIG.restaurantAddress ? `<div class="address">${escapeHtml(APP_CONFIG.restaurantAddress)}</div>` : ''}
+      ${APP_CONFIG.contactNumber ? `<div class="contact">Ph: ${escapeHtml(APP_CONFIG.contactNumber)}</div>` : ''}
+    </div>
+    ` : ''}
 
-      <div class="flex-center" style="font-weight: 700; margin-top: 25px;">BILL</div>
+    <hr class="divider" />
 
-      <div class="meta">
-        <div class="">Order ID: &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;#${escapeHtml(document.orderId)}</div>
-        <div class="">Date & Time:&nbsp;&nbsp;&nbsp;&nbsp; ${escapeHtml(document.generatedAt)}</div>
+    <!-- ORDER META & RECEIPT LABEL -->
+    <div class="meta">
+      <div class="receipt-label">BILL</div>
+      <table>
+        <tr><td class="label">Order </td><td class="value">#${escapeHtml(document.orderId)}</td></tr>
+        <tr><td class="label">Date</td><td class="value">${escapeHtml(document.generatedAt)}</td></tr>
+        ${document.customerName ? `<tr><td class="label">Customer</td><td class="value">${escapeHtml(document.customerName)}</td></tr>` : ''}
+      </table>
+    </div>
+
+    <hr class="divider" />
+
+    <!-- COLUMN HEADER -->
+    <div class="col-header">
+      <span>Item</span>
+      <span>Amount</span>
+    </div>
+
+    <hr class="divider-thin" />
+
+    <!-- LINE ITEMS -->
+    ${linesHtml}
+
+    ${noteHtml}
+
+    <!-- TOTALS -->
+    <hr class="divider" />
+
+    <div class="totals">
+      ${chargesHtml}
+      ${discountHtml}
+      <div class="total-row total-grand">
+        <span>TOTAL</span>
+        <span>${escapeHtml(formatCurrency(document.total ?? 0))}</span>
       </div>
+    </div>
 
-      <div class="divider"></div>
-      
-      ${linesHtml}
-      
-      <div class="totals">
-        ${chargesHtml}
-        ${discountHtml}
-        <div class="total-row total-grand">
-        <span>Total</span>
-        ${escapeHtml(formatCurrency(document.total ?? 0))}
-        </div>
-      </div>
+    <hr class="divider" />
 
-      <div class="divider"></div>
-      
-      <div class="footer">
-        <div class="thank-you">Thank You!</div>
-        <div>Visit Again</div>
-      </div>
+    <!-- FOOTER -->
+    <div class="footer">
+      Thank You!
+      <div class="footer-sub">Visit Again</div>
     </div>
   </body>
 </html>`;
@@ -320,8 +444,8 @@ export function buildBillHtml(
 
 export function buildKotHtml(
   document: PrintableDocument,
-  paperWidthMm: number = 80,
 ): string {
+  const paperWidthMm = 80;
   const linesHtml = document.lines
     .map(
       (line) => {
@@ -364,36 +488,33 @@ export function buildKotHtml(
         font-style: normal;
         font-weight: 400;
         font-display: swap;
-        src: url('/fonts/noto-sans-devanagari-400.woff2') format('woff2');
+        src: url('${cachedNoto400DataUri || "/fonts/noto-sans-devanagari-400.woff2"}') format('woff2');
       }
       @font-face {
         font-family: 'Noto Sans Devanagari';
         font-style: normal;
         font-weight: 700;
         font-display: swap;
-        src: url('/fonts/noto-sans-devanagari-700.woff2') format('woff2');
+        src: url('${cachedNoto700DataUri || "/fonts/noto-sans-devanagari-700.woff2"}') format('woff2');
       }
 
-      :root { color-scheme: light; --paper: ${paperWidthMm}mm; }
-      * { box-sizing: border-box; }
+      * { box-sizing: border-box; margin: 0; padding: 0; }
 
       @page {
-        size: var(--paper) auto;
+        size: ${paperWidthMm}mm auto;
         margin: 0;
       }
 
       html, body {
-        width: 80mm;
-        zoom: calc(${paperWidthMm} / 80);
-        margin: 0;
-        padding: 0;
+        width: ${paperWidthMm}mm;
         background: #fff;
+        color: #000;
       }
 
       body {
-        font-family: 'Noto Sans Devanagari', 'Segoe UI', system-ui, sans-serif;
-        color: #111;
-        padding: 8px 10px 16px;
+        font-family: 'Noto Sans Devanagari', 'Segoe UI', Arial, sans-serif;
+        font-size: 10pt;
+        padding: 6pt 8pt 16pt;
       }
 
       .receipt { width: 100%; }
@@ -401,67 +522,62 @@ export function buildKotHtml(
       /* KOT Header */
       .header {
         text-align: center;
-        border-bottom: 2px dashed #111;
-        padding-bottom: 6px;
-        margin-bottom: 6px;
+        border-bottom: 1.5pt dashed #000;
+        padding-bottom: 6pt;
+        margin-bottom: 6pt;
       }
       .kot-title {
-        font-size: 20px;
+        font-size: 20pt;
         font-weight: 900;
         letter-spacing: 0.12em;
-        padding: 1px 8px;
-        margin: 8px 0 0 0;
+        margin-top: 6pt;
       }
       .datetime {
-        font-size: 12px;
-        color: #444;
-        margin-top: 3px;
-        padding: 2px 0px;
+        font-size: 9.5pt;
+        margin-top: 2pt;
       }
 
       /* Badges */
       .badge {
         display: inline-block;
-        font-size: 13px;
+        font-size: 10pt;
         font-weight: 800;
-        border: 2px solid #111;
-        padding: 1px 8px;
-        letter-spacing: 0.12em;
-        margin: 2px 0;
+        border: 1.5pt solid #000;
+        padding: 2pt 8pt;
+        letter-spacing: 0.08em;
       }
       .meta-row {
-        font-size: 13px;
+        font-size: 10pt;
         font-weight: 700;
-        margin-top: 3px;
-        padding: 2px 0px;
+        margin-top: 2pt;
       }
 
       /* Items */
       .line {
-        padding: 6px;
-        border-bottom: 1px dotted #bbb;
+        padding: 4pt 0;
       }
       .line-main {
         display: flex;
-        align-items: center;
+        align-items: flex-start;
         justify-content: space-between;
-        gap: 6px;
+        gap: 8pt;
       }
-      .item-name { font-size: 16px; font-weight: 500; flex: 1; }
-      .qty       { font-size: 14px; font-weight: 700; white-space: nowrap; }
-      .addon-line { font-size: 13px; color: #444; padding-left: 10px; margin-top: 2px; }
+      .item-name { font-size: 14pt; font-weight: 700; flex: 1; line-height: 1.3; }
+      .qty       { font-size: 14pt; font-weight: 900; white-space: nowrap; }
+      .addon-line { font-size: 11pt; padding-left: 10pt; margin-top: 2pt; font-weight: 600; }
 
       /* Note */
       .note {
-        margin-top: 6px;
-        padding: 6px;
-        font-size: 13px;
+        margin-top: 6pt;
+        padding: 4pt 0;
+        font-size: 11pt;
+        line-height: 1.4;
       }
 
       .flex {
         display: flex;
         justify-content: space-between;
-        padding: 5px 10px;
+        padding: 4pt 8pt;
         align-items: flex-end;
       }
     </style>
@@ -497,8 +613,8 @@ class TauriPrinterAdapter implements PrintAdapter {
     const settings = await getPrinterSettings();
     const html =
       document.kind === "kot"
-        ? buildKotHtml(document, settings.paperWidthMm)
-        : buildBillHtml(document, settings.paperWidthMm);
+        ? buildKotHtml(document)
+        : buildBillHtml(document);
 
     await printReceipt(html, settings.printerName);
   }

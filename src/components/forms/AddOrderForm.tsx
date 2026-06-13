@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Order, OrderItem, OrderItemAddon, OrderType, ExtraCharge } from '../../types';
 import { useMenuStore } from '../../store/menuStore';
 import { useOrderStore } from '../../store/orderStore';
@@ -6,6 +6,7 @@ import { formatCurrency } from '../../utils/currencyUtils';
 import { showToast } from '../shared/Toast';
 import { addOrder as createOrder, updateOrder } from '../../services/orderService';
 import Icon from '../shared/Icon';
+import { useAsyncAction } from '../../hooks/useAsyncAction';
 
 interface Props {
   onClose: () => void;
@@ -175,46 +176,45 @@ export default function AddOrderForm({ onClose, order, onSaved }: Props) {
     setAddonPickerForIndex(null);
   };
 
-  const handleSubmit = () => {
+  const submitAsync = useCallback(async () => {
     if (items.length === 0) {
       showToast('Select at least one item', 'error');
       return;
     }
+    if (order) {
+      await updateOrder(order.id, {
+        type: orderType,
+        customerName: customerName.trim() || undefined,
+        items,
+        paymentMethod: order.paymentMethod ?? 'Unpaid',
+        discount: discount ? parseFloat(discount) || 0 : undefined,
+        note: note.trim() || undefined,
+        status: order.status,
+        cashAmount: order.cashAmount,
+        upiAmount: order.upiAmount,
+        completedAt: order.completedAt,
+        extraCharges: extraCharges.length > 0 ? extraCharges : undefined,
+      });
+    } else {
+      await createOrder({
+        type: orderType,
+        customerName: customerName.trim() || undefined,
+        items,
+        paymentMethod: 'Unpaid',
+        discount: discount ? parseFloat(discount) || 0 : undefined,
+        note: note.trim() || undefined,
+        status: 'Open',
+        extraCharges: extraCharges.length > 0 ? extraCharges : undefined,
+      });
+    }
+    await load();
+    showToast(order ? 'Order updated' : 'Order created', 'success');
+    if (!order) resetForm();
+    onSaved?.();
+    onClose();
+  }, [order, orderType, customerName, items, discount, note, extraCharges, load, onSaved, onClose]);
 
-    void (async () => {
-      if (order) {
-        await updateOrder(order.id, {
-          type: orderType,
-          customerName: customerName.trim() || undefined,
-          items,
-          paymentMethod: order.paymentMethod ?? 'Unpaid',
-          discount: discount ? parseFloat(discount) || 0 : undefined,
-          note: note.trim() || undefined,
-          status: order.status,
-          cashAmount: order.cashAmount,
-          upiAmount: order.upiAmount,
-          completedAt: order.completedAt,
-          extraCharges: extraCharges.length > 0 ? extraCharges : undefined,
-        });
-      } else {
-        await createOrder({
-          type: orderType,
-          customerName: customerName.trim() || undefined,
-          items,
-          paymentMethod: 'Unpaid',
-          discount: discount ? parseFloat(discount) || 0 : undefined,
-          note: note.trim() || undefined,
-          status: 'Open',
-          extraCharges: extraCharges.length > 0 ? extraCharges : undefined,
-        });
-      }
-      await load();
-      showToast(order ? 'Order updated' : 'Order created', 'success');
-      if (!order) resetForm();
-      onSaved?.();
-      onClose();
-    })();
-  };
+  const [handleSubmit, isSaving] = useAsyncAction(submitAsync);
 
   return (
     <div className="modal-body record-order-body">
@@ -508,9 +508,9 @@ export default function AddOrderForm({ onClose, order, onSaved }: Props) {
           </div>
 
           <div className="modal-actions" style={{ padding: 0 }}>
-            <button type="button" className="btn btn-ghost" onClick={onClose}>Cancel</button>
-            <button type="button" className="btn btn-primary" onClick={handleSubmit} disabled={items.length === 0}>
-              {isEditing ? 'Save Changes' : 'Record Order'}
+            <button type="button" className="btn btn-ghost" onClick={onClose} disabled={isSaving}>Cancel</button>
+            <button type="button" className="btn btn-primary" onClick={handleSubmit} disabled={items.length === 0 || isSaving}>
+              {isSaving ? 'Saving…' : isEditing ? 'Save Changes' : 'Record Order'}
             </button>
           </div>
         </aside>

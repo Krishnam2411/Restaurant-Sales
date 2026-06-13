@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { MouseEvent } from 'react';
 import type { Order, OrderItem, PaymentMethod, SaleItem } from '../types';
 import { useOrderStore } from '../store/orderStore';
@@ -12,6 +12,7 @@ import Modal from '../components/shared/Modal';
 import { buildBillHtml, buildKotHtml, getLogoDataUri } from '../services/printerMiddleware';
 import { previewReceipt } from '../services/printerService';
 import Icon from '../components/shared/Icon';
+import { useAsyncAction } from '../hooks/useAsyncAction';
 
 interface ManageOrdersProps {
   onNewOrder: () => void;
@@ -45,7 +46,6 @@ export default function ManageOrders({ onNewOrder, onEditOrder }: ManageOrdersPr
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('Cash');
   const [cashAmount, setCashAmount] = useState('');
   const [upiAmount, setUpiAmount] = useState('');
-  const [previewing, setPreviewing] = useState(false);
   const [cancelConfirmOpen, setCancelConfirmOpen] = useState(false);
   const [servedItems, setServedItems] = useState<Record<string, boolean>>(() => {
     try {
@@ -106,226 +106,210 @@ export default function ManageOrders({ onNewOrder, onEditOrder }: ManageOrdersPr
     }
   }, [selectedOrder]);
 
-  const handleComplete = () => {
-    void (async () => {
-      if (!selectedOrder) return;
-      const currentTotal = orderTotalWithChargesAndDiscount(selectedOrder);
-      if (currentTotal <= 0) {
-        showToast('Add items before completing the order', 'error');
-        return;
-      }
+  const completeAsync = useCallback(async () => {
+    if (!selectedOrder) return;
+    const currentTotal = orderTotalWithChargesAndDiscount(selectedOrder);
+    if (currentTotal <= 0) {
+      showToast('Add items before completing the order', 'error');
+      return;
+    }
 
-      let nextCash: number | undefined;
-      let nextUpi: number | undefined;
-      if (paymentMethod === 'Cash') {
-        nextCash = currentTotal;
-        nextUpi = 0;
-      } else if (paymentMethod === 'UPI') {
-        nextCash = 0;
-        nextUpi = currentTotal;
-      } else {
-        nextCash = Number(cashAmount);
-        nextUpi = Number(upiAmount);
-      }
+    let nextCash: number | undefined;
+    let nextUpi: number | undefined;
+    if (paymentMethod === 'Cash') {
+      nextCash = currentTotal;
+      nextUpi = 0;
+    } else if (paymentMethod === 'UPI') {
+      nextCash = 0;
+      nextUpi = currentTotal;
+    } else {
+      nextCash = Number(cashAmount);
+      nextUpi = Number(upiAmount);
+    }
 
-      if (!Number.isFinite(nextCash) || !Number.isFinite(nextUpi)) {
-        showToast('Enter valid split amounts', 'error');
-        return;
-      }
+    if (!Number.isFinite(nextCash) || !Number.isFinite(nextUpi)) {
+      showToast('Enter valid split amounts', 'error');
+      return;
+    }
 
-      if (Math.round((nextCash ?? 0) + (nextUpi ?? 0)) !== Math.round(currentTotal)) {
-        showToast('Split payment must match the order total', 'error');
-        return;
-      }
+    if (Math.round((nextCash ?? 0) + (nextUpi ?? 0)) !== Math.round(currentTotal)) {
+      showToast('Split payment must match the order total', 'error');
+      return;
+    }
 
-      await saveOrderUpdate(selectedOrder.id, {
-        type: selectedOrder.type,
-        customerName: selectedOrder.customerName,
-        items: selectedOrder.items,
-        paymentMethod,
-        cashAmount: nextCash,
-        upiAmount: nextUpi,
-        note: selectedOrder.note,
-        status: 'Completed',
-        completedAt: new Date().toISOString(),
+    await saveOrderUpdate(selectedOrder.id, {
+      type: selectedOrder.type,
+      customerName: selectedOrder.customerName,
+      items: selectedOrder.items,
+      paymentMethod,
+      cashAmount: nextCash,
+      upiAmount: nextUpi,
+      note: selectedOrder.note,
+      status: 'Completed',
+      completedAt: new Date().toISOString(),
+    });
+
+    const saleItems: SaleItem[] = selectedOrder.items
+      .filter(item => item.countsInSales)
+      .map(item => ({
+        menuItemId: item.menuItemId,
+        name: item.name,
+        qty: item.qty,
+        unitPrice: item.unitPrice,
+        addons: item.addons,
+      }));
+
+    const subtotalForSales = selectedOrder.items
+      .filter(item => item.countsInSales)
+      .reduce((sum, item) => {
+        const addonTotal = (item.addons ?? []).reduce((s, a) => s + (a.qty ?? 1) * a.price, 0);
+        return sum + item.qty * item.unitPrice + addonTotal;
+      }, 0);
+    const saleChargesSum = (selectedOrder.extraCharges ?? []).reduce((s, c) => s + c.amount, 0);
+    const saleAmount = Math.max(0, subtotalForSales + saleChargesSum - (selectedOrder.discount ?? 0));
+
+    let saleCash: number | undefined;
+    let saleUpi: number | undefined;
+    if (paymentMethod === 'Cash') {
+      saleCash = saleAmount;
+      saleUpi = 0;
+    } else if (paymentMethod === 'UPI') {
+      saleCash = 0;
+      saleUpi = saleAmount;
+    } else {
+      const cashRatio = currentTotal > 0 ? (nextCash ?? 0) / currentTotal : 0.5;
+      saleCash = +(saleAmount * cashRatio).toFixed(2);
+      saleUpi = +(saleAmount - saleCash).toFixed(2);
+    }
+
+    const extraSummary = selectedOrder.items
+      .filter(item => !item.countsInSales)
+      .map(item => `${item.qty}x ${item.name}`)
+      .join(', ');
+
+    addSale({
+      orderCode: selectedOrder.code,
+      date: todayISO(),
+      time: nowTime(),
+      items: saleItems,
+      amount: saleAmount,
+      discount: selectedOrder.discount ?? undefined,
+      channel: selectedOrder.type,
+      paymentMethod,
+      cashAmount: saleCash,
+      upiAmount: saleUpi,
+      note: [selectedOrder.note?.trim() ?? '', extraSummary ? `Extras: ${extraSummary}` : ''].filter(Boolean).join(' · ') || undefined,
+      extraCharges: selectedOrder.extraCharges,
+    });
+
+    // cleanup served items from localStorage
+    setServedItems(prev => {
+      const next = { ...prev };
+      Object.keys(next).forEach(k => {
+        if (k.startsWith(`${selectedOrder.code}-`)) {
+          delete next[k];
+        }
       });
+      localStorage.setItem('served_items', JSON.stringify(next));
+      return next;
+    });
 
-      const saleItems: SaleItem[] = selectedOrder.items
-        .filter(item => item.countsInSales)
-        .map(item => ({
-          menuItemId: item.menuItemId,
-          name: item.name,
-          qty: item.qty,
-          unitPrice: item.unitPrice,
-          addons: item.addons,
-        }));
+    showToast('Order completed', 'success');
+    await load();
+  }, [selectedOrder, paymentMethod, cashAmount, upiAmount, addSale, load]);
 
-      const subtotalForSales = selectedOrder.items
-        .filter(item => item.countsInSales)
-        .reduce((sum, item) => {
-          const addonTotal = (item.addons ?? []).reduce((s, a) => s + (a.qty ?? 1) * a.price, 0);
-          return sum + item.qty * item.unitPrice + addonTotal;
-        }, 0);
-      const saleChargesSum = (selectedOrder.extraCharges ?? []).reduce((s, c) => s + c.amount, 0);
-      const saleAmount = Math.max(0, subtotalForSales + saleChargesSum - (selectedOrder.discount ?? 0));
-
-      let saleCash: number | undefined;
-      let saleUpi: number | undefined;
-      if (paymentMethod === 'Cash') {
-        saleCash = saleAmount;
-        saleUpi = 0;
-      } else if (paymentMethod === 'UPI') {
-        saleCash = 0;
-        saleUpi = saleAmount;
-      } else {
-        const cashRatio = currentTotal > 0 ? (nextCash ?? 0) / currentTotal : 0.5;
-        saleCash = +(saleAmount * cashRatio).toFixed(2);
-        saleUpi = +(saleAmount - saleCash).toFixed(2);
-      }
-
-      const extraSummary = selectedOrder.items
-        .filter(item => !item.countsInSales)
-        .map(item => `${item.qty}x ${item.name}`)
-        .join(', ');
-
-      addSale({
-        orderCode: selectedOrder.code,
-        date: todayISO(),
-        time: nowTime(),
-        items: saleItems,
-        amount: saleAmount,
-        discount: selectedOrder.discount ?? undefined,
-        channel: selectedOrder.type,
-        paymentMethod,
-        cashAmount: saleCash,
-        upiAmount: saleUpi,
-        note: [selectedOrder.note?.trim() ?? '', extraSummary ? `Extras: ${extraSummary}` : ''].filter(Boolean).join(' · ') || undefined,
-        extraCharges: selectedOrder.extraCharges,
-      });
-
-      // cleanup served items from localStorage
-      setServedItems(prev => {
-        const next = { ...prev };
-        Object.keys(next).forEach(k => {
-          if (k.startsWith(`${selectedOrder.code}-`)) {
-            delete next[k];
-          }
-        });
-        localStorage.setItem('served_items', JSON.stringify(next));
-        return next;
-      });
-
-      showToast('Order completed', 'success');
-      await load();
-    })();
-  };
+  const [handleComplete, isCompleting] = useAsyncAction(completeAsync);
 
 
   // ---------------------------------------------------------------------------
   // Preview — opens a native Tauri WebviewWindow (no modal)
   // ---------------------------------------------------------------------------
 
-  const handlePreviewBill = () => {
+  const previewBillAsync = useCallback(async () => {
     if (!selectedOrder) return;
-    void (async () => {
-      setPreviewing(true);
-      try {
-        const subtotal = orderSubtotal(selectedOrder.items);
-        const chargesSum = (selectedOrder.extraCharges ?? []).reduce((s, c) => s + c.amount, 0);
-        const total = Math.max(0, subtotal + chargesSum - (selectedOrder.discount ?? 0));
-        const logoUrl = await getLogoDataUri();
-        const doc = {
-          kind: 'bill' as const,
-          title: `Bill - ${selectedOrder.code}`,
-          orderId: selectedOrder.code,
-          generatedAt: new Date().toLocaleString('en-IN'),
-          orderType: (selectedOrder.type === 'Dine' ? 'SERVE' : 'PACK') as 'SERVE' | 'PACK',
-          customerName: selectedOrder.customerName,
-          note: selectedOrder.note,
-          lines: selectedOrder.items.map(item => {
-            const menuItem = item.menuItemId ? menuItems.find(m => m.id === item.menuItemId) : undefined;
-            const sourceName = menuItem?.name ?? item.name;
-            const addonTotal = (item.addons ?? []).reduce((s, a) => s + (a.qty ?? 1) * a.price, 0);
-            return {
-              name: sourceName,
-              hindiName: menuItem?.localizedNameHi?.trim() || sourceName,
-              qty: item.qty,
-              unitPrice: item.unitPrice,
-              lineTotal: item.qty * item.unitPrice + addonTotal,
-              addons: (item.addons ?? []).map(a => ({
-                name: a.name,
-                hindiName: a.localizedNameHi || a.name,
-                price: (a.qty ?? 1) * a.price,
-                qty: a.qty ?? 1,
-              })),
-            };
-          }),
-          discount: selectedOrder.discount,
-          total,
-          logoUrl,
-          extraCharges: selectedOrder.extraCharges,
+    const subtotal = orderSubtotal(selectedOrder.items);
+    const chargesSum = (selectedOrder.extraCharges ?? []).reduce((s, c) => s + c.amount, 0);
+    const total = Math.max(0, subtotal + chargesSum - (selectedOrder.discount ?? 0));
+    const logoUrl = await getLogoDataUri();
+    const doc = {
+      kind: 'bill' as const,
+      title: `Bill - ${selectedOrder.code}`,
+      orderId: selectedOrder.code,
+      generatedAt: new Date().toLocaleString('en-IN'),
+      orderType: (selectedOrder.type === 'Dine' ? 'SERVE' : 'PACK') as 'SERVE' | 'PACK',
+      customerName: selectedOrder.customerName,
+      note: selectedOrder.note,
+      lines: selectedOrder.items.map(item => {
+        const menuItem = item.menuItemId ? menuItems.find(m => m.id === item.menuItemId) : undefined;
+        const sourceName = menuItem?.name ?? item.name;
+        const addonTotal = (item.addons ?? []).reduce((s, a) => s + (a.qty ?? 1) * a.price, 0);
+        return {
+          name: sourceName,
+          hindiName: menuItem?.localizedNameHi?.trim() || sourceName,
+          qty: item.qty,
+          unitPrice: item.unitPrice,
+          lineTotal: item.qty * item.unitPrice + addonTotal,
+          addons: (item.addons ?? []).map(a => ({
+            name: a.name,
+            hindiName: a.localizedNameHi || a.name,
+            price: (a.qty ?? 1) * a.price,
+            qty: a.qty ?? 1,
+          })),
         };
-        const html = buildBillHtml(doc, 80);
-        await previewReceipt(html);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : 'Preview failed';
-        showToast(`Bill preview: ${message}`, 'error');
-      } finally {
-        setPreviewing(false);
-      }
-    })();
-  };
+      }),
+      discount: selectedOrder.discount,
+      total,
+      logoUrl,
+      extraCharges: selectedOrder.extraCharges,
+    };
+    const html = buildBillHtml(doc);
+    await previewReceipt(html);
+  }, [selectedOrder, menuItems]);
 
-  const handlePreviewKot = () => {
+  const previewKotAsync = useCallback(async () => {
     if (!selectedOrder) return;
-    void (async () => {
-      setPreviewing(true);
-      try {
-        const lines = selectedOrder.items
-          .map(item => {
-            const printed = item.kotPrintedQty ?? 0;
-            const remaining = Math.max(0, item.qty - printed);
-            return { item, remaining };
-          })
-          .filter(({ remaining }) => remaining > 0)
-          .map(({ item, remaining }) => {
-            const menuItem = item.menuItemId ? menuItems.find(m => m.id === item.menuItemId) : undefined;
-            const sourceName = menuItem?.name ?? item.name;
-            return {
-              name: sourceName,
-              hindiName: menuItem?.localizedNameHi?.trim() || sourceName,
-              qty: remaining,
-              unitPrice: item.unitPrice,
-              lineTotal: item.qty * item.unitPrice,
-              addons: (item.addons ?? []).map(a => ({
-                name: a.name,
-                hindiName: a.localizedNameHi || a.name,
-                price: (a.qty ?? 1) * a.price,
-                qty: a.qty ?? 1,
-              })),
-            };
-          });
-
-        const doc = {
-          kind: 'kot' as const,
-          title: `KOT - ${selectedOrder.code}`,
-          orderId: selectedOrder.code,
-          generatedAt: new Date().toLocaleString('en-IN'),
-          orderType: (selectedOrder.type === 'Dine' ? 'SERVE' : 'PACK') as 'SERVE' | 'PACK',
-          customerName: selectedOrder.customerName,
-          note: selectedOrder.note,
-          lines,
+    const lines = selectedOrder.items
+      .map(item => {
+        const printed = item.kotPrintedQty ?? 0;
+        const remaining = Math.max(0, item.qty - printed);
+        return { item, remaining };
+      })
+      .filter(({ remaining }) => remaining > 0)
+      .map(({ item, remaining }) => {
+        const menuItem = item.menuItemId ? menuItems.find(m => m.id === item.menuItemId) : undefined;
+        const sourceName = menuItem?.name ?? item.name;
+        return {
+          name: sourceName,
+          hindiName: menuItem?.localizedNameHi?.trim() || sourceName,
+          qty: remaining,
+          unitPrice: item.unitPrice,
+          lineTotal: item.qty * item.unitPrice,
+          addons: (item.addons ?? []).map(a => ({
+            name: a.name,
+            hindiName: a.localizedNameHi || a.name,
+            price: (a.qty ?? 1) * a.price,
+            qty: a.qty ?? 1,
+          })),
         };
-        const html = buildKotHtml(doc, 80);
-        await previewReceipt(html);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : 'Preview failed';
-        showToast(`KOT preview: ${message}`, 'error');
-      } finally {
-        setPreviewing(false);
-      }
-    })();
-  };
+      });
+
+    const doc = {
+      kind: 'kot' as const,
+      title: `KOT - ${selectedOrder.code}`,
+      orderId: selectedOrder.code,
+      generatedAt: new Date().toLocaleString('en-IN'),
+      orderType: (selectedOrder.type === 'Dine' ? 'SERVE' : 'PACK') as 'SERVE' | 'PACK',
+      customerName: selectedOrder.customerName,
+      note: selectedOrder.note,
+      lines,
+    };
+    const html = buildKotHtml(doc);
+    await previewReceipt(html);
+  }, [selectedOrder, menuItems]);
+
+  const [handlePreviewBill, isPreviewingBill] = useAsyncAction(previewBillAsync);
+  const [handlePreviewKot, isPreviewingKot] = useAsyncAction(previewKotAsync);
+  const isPreviewing = isPreviewingBill || isPreviewingKot;
 
   const handleLayoutClick = (event: MouseEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement;
@@ -337,69 +321,69 @@ export default function ManageOrders({ onNewOrder, onEditOrder }: ManageOrdersPr
     setSelectedOrderId('');
   };
 
-  const handleCancelOrder = () => {
-    void (async () => {
-      if (!selectedOrder) return;
+  const cancelAsync = useCallback(async () => {
+    if (!selectedOrder) return;
 
-      const saleItems: SaleItem[] = selectedOrder.items
-        .filter(item => item.countsInSales)
-        .map(item => ({
-          menuItemId: item.menuItemId,
-          name: item.name,
-          qty: item.qty,
-          unitPrice: item.unitPrice,
-          addons: item.addons,
-        }));
+    const saleItems: SaleItem[] = selectedOrder.items
+      .filter(item => item.countsInSales)
+      .map(item => ({
+        menuItemId: item.menuItemId,
+        name: item.name,
+        qty: item.qty,
+        unitPrice: item.unitPrice,
+        addons: item.addons,
+      }));
 
-      const extraSummary = selectedOrder.items
-        .filter(item => !item.countsInSales)
-        .map(item => `${item.qty}x ${item.name}`)
-        .join(', ');
+    const extraSummary = selectedOrder.items
+      .filter(item => !item.countsInSales)
+      .map(item => `${item.qty}x ${item.name}`)
+      .join(', ');
 
-      addSale({
-        orderCode: selectedOrder.code,
-        date: todayISO(),
-        time: nowTime(),
-        items: saleItems,
-        amount: 0,
-        discount: selectedOrder.discount ?? undefined,
-        channel: selectedOrder.type,
-        paymentMethod: 'Cancelled',
-        cashAmount: 0,
-        upiAmount: 0,
-        note: [selectedOrder.note?.trim() ?? '', extraSummary ? `Extras: ${extraSummary}` : '', 'Cancelled Order'].filter(Boolean).join(' · ') || undefined,
-        extraCharges: selectedOrder.extraCharges,
+    addSale({
+      orderCode: selectedOrder.code,
+      date: todayISO(),
+      time: nowTime(),
+      items: saleItems,
+      amount: 0,
+      discount: selectedOrder.discount ?? undefined,
+      channel: selectedOrder.type,
+      paymentMethod: 'Cancelled',
+      cashAmount: 0,
+      upiAmount: 0,
+      note: [selectedOrder.note?.trim() ?? '', extraSummary ? `Extras: ${extraSummary}` : '', 'Cancelled Order'].filter(Boolean).join(' · ') || undefined,
+      extraCharges: selectedOrder.extraCharges,
+    });
+
+    await saveOrderUpdate(selectedOrder.id, {
+      type: selectedOrder.type,
+      customerName: selectedOrder.customerName,
+      items: selectedOrder.items,
+      paymentMethod: selectedOrder.paymentMethod,
+      cashAmount: selectedOrder.cashAmount,
+      upiAmount: selectedOrder.upiAmount,
+      note: selectedOrder.note,
+      status: 'Cancelled',
+    });
+
+    // cleanup served items from localStorage
+    setServedItems(prev => {
+      const next = { ...prev };
+      Object.keys(next).forEach(k => {
+        if (k.startsWith(`${selectedOrder.code}-`)) {
+          delete next[k];
+        }
       });
+      localStorage.setItem('served_items', JSON.stringify(next));
+      return next;
+    });
 
-      await saveOrderUpdate(selectedOrder.id, {
-        type: selectedOrder.type,
-        customerName: selectedOrder.customerName,
-        items: selectedOrder.items,
-        paymentMethod: selectedOrder.paymentMethod,
-        cashAmount: selectedOrder.cashAmount,
-        upiAmount: selectedOrder.upiAmount,
-        note: selectedOrder.note,
-        status: 'Cancelled',
-      });
+    showToast('Order cancelled', 'success');
+    setSelectedOrderId('');
+    setCancelConfirmOpen(false);
+    await load();
+  }, [selectedOrder, addSale, load]);
 
-      // cleanup served items from localStorage
-      setServedItems(prev => {
-        const next = { ...prev };
-        Object.keys(next).forEach(k => {
-          if (k.startsWith(`${selectedOrder.code}-`)) {
-            delete next[k];
-          }
-        });
-        localStorage.setItem('served_items', JSON.stringify(next));
-        return next;
-      });
-
-      showToast('Order cancelled', 'success');
-      setSelectedOrderId('');
-      setCancelConfirmOpen(false);
-      await load();
-    })();
-  };
+  const [handleCancelOrder, isCancelling] = useAsyncAction(cancelAsync);
 
   const canComplete = Boolean(selectedOrder && selectedOrder.items.length > 0);
 
@@ -505,25 +489,25 @@ export default function ManageOrders({ onNewOrder, onEditOrder }: ManageOrdersPr
                   type="button"
                   className="btn btn-ghost"
                   onClick={handlePreviewBill}
-                  disabled={previewing}
+                  disabled={isPreviewing}
                   title="Preview bill"
                 >
-                  <Icon name="receipt" size={15} /> {previewing ? 'Opening...' : 'Bill'}
+                  <Icon name="receipt" size={15} /> {isPreviewingBill ? 'Opening...' : 'Bill'}
                 </button>
                 <button
                   type="button"
                   className="btn btn-ghost"
                   onClick={handlePreviewKot}
-                  disabled={previewing}
+                  disabled={isPreviewing}
                   title="Preview KOT"
                 >
-                  <Icon name="receipt-text" size={14} /> {previewing ? 'Opening...' : 'KOT'}
+                  <Icon name="receipt-text" size={14} /> {isPreviewingKot ? 'Opening...' : 'KOT'}
                 </button>
 
-                <button type="button" className="btn btn-ghost" onClick={() => onEditOrder(selectedOrder)}>
+                <button type="button" className="btn btn-ghost" onClick={() => onEditOrder(selectedOrder)} disabled={isCompleting}>
                   <Icon name="edit" size={14} /> Edit
                 </button>
-                <button type="button" className="btn btn-danger" onClick={() => setCancelConfirmOpen(true)}>Cancel</button>
+                <button type="button" className="btn btn-danger" onClick={() => setCancelConfirmOpen(true)} disabled={isCompleting}>Cancel</button>
               </div>
             </div>
 
@@ -650,7 +634,9 @@ export default function ManageOrders({ onNewOrder, onEditOrder }: ManageOrdersPr
               )}
 
               <div className="modal-actions" style={{ padding: 0, marginTop: 12 }}>
-                <button type="button" className="btn btn-primary" onClick={handleComplete} disabled={!canComplete}>Complete Order</button>
+                <button type="button" className="btn btn-primary" onClick={handleComplete} disabled={!canComplete || isCompleting}>
+                  {isCompleting ? 'Completing…' : 'Complete Order'}
+                </button>
               </div>
             </div>
           </div>
@@ -670,8 +656,10 @@ export default function ManageOrders({ onNewOrder, onEditOrder }: ManageOrdersPr
           <p className="muted"><strong>{selectedOrder?.code}</strong> will be marked as cancelled and removed from live orders.</p>
         </div>
         <div className="modal-actions" style={{ padding: '0 24px 24px' }}>
-          <button type="button" className="btn btn-ghost" onClick={() => setCancelConfirmOpen(false)}>Cancel</button>
-          <button type="button" className="btn btn-danger" onClick={handleCancelOrder}>Continue</button>
+          <button type="button" className="btn btn-ghost" onClick={() => setCancelConfirmOpen(false)} disabled={isCancelling}>Close</button>
+          <button type="button" className="btn btn-danger" onClick={handleCancelOrder} disabled={isCancelling}>
+            {isCancelling ? 'Cancelling…' : 'Continue'}
+          </button>
         </div>
       </Modal>
     </>
