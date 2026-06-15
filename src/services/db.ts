@@ -2,7 +2,7 @@
 // Uses SQLite via Tauri when available, otherwise falls back to localStorage.
 
 import type { MenuItem, Order, OrderItem, Sale, SaleItem } from '../types';
-import { v4 as uuid } from '../utils/uuid';
+
 import { isTauri } from '../utils/tauri';
 import { appDataDir, join } from '@tauri-apps/api/path';
 
@@ -232,6 +232,13 @@ async function ensureSqlite(): Promise<void> {
         )`
       );
 
+      // ── Performance indexes ────────────────────────────
+      // These turn the full-table item SELECTs into O(log n) lookups.
+      await db.execute('CREATE INDEX IF NOT EXISTS idx_sale_items_sale_id ON sale_items(sale_id)');
+      await db.execute('CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON order_items(order_id)');
+      await db.execute('CREATE INDEX IF NOT EXISTS idx_sales_date ON sales(date DESC, time DESC)');
+      await db.execute('CREATE INDEX IF NOT EXISTS idx_orders_updated ON orders(updated_at DESC, created_at DESC)');
+
       const menuCols: Array<{ name: string }> = await db.select('PRAGMA table_info(menu_items)');
       const hasLocalizedNameHi = menuCols.some(col => col.name === 'localized_name_hi');
       if (!hasLocalizedNameHi) {
@@ -384,9 +391,7 @@ export async function dbSaveSales(sales: Sale[]): Promise<void> {
   await ensureSqlite();
   if (!sqlite) return;
 
-  await sqlite.execute('DELETE FROM sale_items');
-  await sqlite.execute('DELETE FROM sales');
-
+  // ── Upsert-based write: no bulk DELETE so concurrent reads can't see an empty table ──
   for (const sale of sales) {
     const subtotal = sale.subtotal ?? sale.items.reduce((s, it) => s + it.qty * it.unitPrice, 0);
     const discount = sale.discount ?? 0;
@@ -394,8 +399,12 @@ export async function dbSaveSales(sales: Sale[]): Promise<void> {
     const taxRate = sale.taxRateApplied ?? 0;
     const taxAmount = sale.taxAmount ?? +(discountedSubtotal * (taxRate / 100));
     const totalAmount = sale.amount ?? +(discountedSubtotal + taxAmount);
+
+    // Upsert the sale row (INSERT OR REPLACE honours the PRIMARY KEY)
     await sqlite.execute(
-      'INSERT INTO sales (id, order_code, date, time, subtotal, discount, tax_rate, tax_amount, total_amount, amount, payment_method, cash_amount, upi_amount, channel, note, created_at, extra_charges) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      `INSERT OR REPLACE INTO sales
+        (id, order_code, date, time, subtotal, discount, tax_rate, tax_amount, total_amount, amount, payment_method, cash_amount, upi_amount, channel, note, created_at, extra_charges)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         sale.id,
         sale.orderCode ?? null,
@@ -413,16 +422,46 @@ export async function dbSaveSales(sales: Sale[]): Promise<void> {
         sale.channel ?? 'Takeaway',
         sale.note ?? null,
         sale.createdAt,
-        sale.extraCharges ? JSON.stringify(sale.extraCharges) : null
+        sale.extraCharges ? JSON.stringify(sale.extraCharges) : null,
       ]
     );
 
-    for (const item of sale.items) {
+    // Deterministic item IDs: `<sale_id>:<index>` — stable across saves, no extra SELECT needed.
+    const itemIds: string[] = [];
+    for (let i = 0; i < sale.items.length; i++) {
+      const item = sale.items[i];
+      const itemId = `${sale.id}:${i}`;
+      itemIds.push(itemId);
       await sqlite.execute(
-        'INSERT INTO sale_items (id, sale_id, menu_item_id, name, qty, unit_price, addons) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        [uuid(), sale.id, item.menuItemId ?? null, item.name, item.qty, item.unitPrice, item.addons ? JSON.stringify(item.addons) : null]
+        `INSERT OR REPLACE INTO sale_items (id, sale_id, menu_item_id, name, qty, unit_price, addons)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [itemId, sale.id, item.menuItemId ?? null, item.name, item.qty, item.unitPrice, item.addons ? JSON.stringify(item.addons) : null]
       );
     }
+
+    // Remove items that no longer exist for this sale (e.g. item was deleted)
+    if (itemIds.length > 0) {
+      const placeholders = itemIds.map(() => '?').join(', ');
+      await sqlite.execute(
+        `DELETE FROM sale_items WHERE sale_id = ? AND id NOT IN (${placeholders})`,
+        [sale.id, ...itemIds]
+      );
+    } else {
+      await sqlite.execute('DELETE FROM sale_items WHERE sale_id = ?', [sale.id]);
+    }
+  }
+
+  // Remove sales that are no longer in the list
+  if (sales.length > 0) {
+    const saleIds = sales.map(s => s.id);
+    const placeholders = saleIds.map(() => '?').join(', ');
+    await sqlite.execute(`DELETE FROM sales WHERE id NOT IN (${placeholders})`, saleIds);
+    // Also clean up any orphaned items from removed sales
+    await sqlite.execute(`DELETE FROM sale_items WHERE sale_id NOT IN (${placeholders})`, saleIds);
+  } else {
+    // Explicitly clearing all sales
+    await sqlite.execute('DELETE FROM sale_items');
+    await sqlite.execute('DELETE FROM sales');
   }
 }
 
@@ -524,9 +563,7 @@ export async function dbSaveOrders(orders: Order[]): Promise<void> {
   await ensureSqlite();
   if (!sqlite) return;
 
-  await sqlite.execute('DELETE FROM order_items');
-  await sqlite.execute('DELETE FROM orders');
-
+  // ── Upsert-based write: no bulk DELETE so concurrent reads can't see an empty table ──
   for (const order of orders) {
     const subtotal = order.items.reduce((sum, item) => {
       const addonTotal = (item.addons ?? []).reduce((s, a) => s + (a.qty ?? 1) * a.price, 0);
@@ -535,8 +572,11 @@ export async function dbSaveOrders(orders: Order[]): Promise<void> {
     const chargesSum = (order.extraCharges ?? []).reduce((s, c) => s + c.amount, 0);
     const totalAmount = Math.max(0, subtotal + chargesSum - (order.discount ?? 0));
 
+    // Upsert the order row
     await sqlite.execute(
-      'INSERT INTO orders (id, code, order_type, customer_name, status, amount, discount, payment_method, cash_amount, upi_amount, note, created_at, updated_at, completed_at, extra_charges) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      `INSERT OR REPLACE INTO orders
+        (id, code, order_type, customer_name, status, amount, discount, payment_method, cash_amount, upi_amount, note, created_at, updated_at, completed_at, extra_charges)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         order.id,
         order.code,
@@ -556,12 +596,43 @@ export async function dbSaveOrders(orders: Order[]): Promise<void> {
       ]
     );
 
-    for (const item of order.items) {
+    // Deterministic item IDs: `<order_id>:<index>` — stable across saves.
+    const itemIds: string[] = [];
+    for (let i = 0; i < order.items.length; i++) {
+      const item = order.items[i];
+      const itemId = `${order.id}:${i}`;
+      itemIds.push(itemId);
       await sqlite.execute(
-        'INSERT INTO order_items (id, order_id, menu_item_id, name, qty, unit_price, counts_in_sales, kot_printed_qty, addons) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [uuid(), order.id, item.menuItemId ?? null, item.name, item.qty, item.unitPrice, item.countsInSales ? 1 : 0, item.kotPrintedQty ?? 0, item.addons ? JSON.stringify(item.addons) : null]
+        `INSERT OR REPLACE INTO order_items
+          (id, order_id, menu_item_id, name, qty, unit_price, counts_in_sales, kot_printed_qty, addons)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [itemId, order.id, item.menuItemId ?? null, item.name, item.qty, item.unitPrice, item.countsInSales ? 1 : 0, item.kotPrintedQty ?? 0, item.addons ? JSON.stringify(item.addons) : null]
       );
     }
+
+    // Remove items that no longer exist for this order
+    if (itemIds.length > 0) {
+      const placeholders = itemIds.map(() => '?').join(', ');
+      await sqlite.execute(
+        `DELETE FROM order_items WHERE order_id = ? AND id NOT IN (${placeholders})`,
+        [order.id, ...itemIds]
+      );
+    } else {
+      await sqlite.execute('DELETE FROM order_items WHERE order_id = ?', [order.id]);
+    }
+  }
+
+  // Remove orders that are no longer in the list
+  if (orders.length > 0) {
+    const orderIds = orders.map(o => o.id);
+    const placeholders = orderIds.map(() => '?').join(', ');
+    await sqlite.execute(`DELETE FROM orders WHERE id NOT IN (${placeholders})`, orderIds);
+    // Also clean up any orphaned items from removed orders
+    await sqlite.execute(`DELETE FROM order_items WHERE order_id NOT IN (${placeholders})`, orderIds);
+  } else {
+    // Explicitly clearing all orders
+    await sqlite.execute('DELETE FROM order_items');
+    await sqlite.execute('DELETE FROM orders');
   }
 }
 
@@ -617,10 +688,12 @@ export async function dbSaveMenuItems(items: MenuItem[]): Promise<void> {
   await ensureSqlite();
   if (!sqlite) return;
 
-  await sqlite.execute('DELETE FROM menu_items');
+  // ── Upsert-based write: avoids wiping the table while a read is in flight ──
   for (const item of items) {
     await sqlite.execute(
-      'INSERT INTO menu_items (id, name, localized_name_hi, price, category, description, image, is_non_profit, is_active, addons, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      `INSERT OR REPLACE INTO menu_items
+        (id, name, localized_name_hi, price, category, description, image, is_non_profit, is_active, addons, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         item.id,
         item.name,
@@ -635,6 +708,15 @@ export async function dbSaveMenuItems(items: MenuItem[]): Promise<void> {
         item.createdAt,
       ]
     );
+  }
+
+  // Remove menu items that were deleted
+  if (items.length > 0) {
+    const ids = items.map(i => i.id);
+    const placeholders = ids.map(() => '?').join(', ');
+    await sqlite.execute(`DELETE FROM menu_items WHERE id NOT IN (${placeholders})`, ids);
+  } else {
+    await sqlite.execute('DELETE FROM menu_items');
   }
 }
 
