@@ -7,7 +7,6 @@ import { useMenuStore } from '../store/menuStore';
 import { formatCurrency } from '../utils/currencyUtils';
 import { nowTime, todayISO } from '../utils/dateUtils';
 import { showToast } from '../components/shared/Toast';
-import { updateOrder as saveOrderUpdate } from '../services/orderService';
 import Modal from '../components/shared/Modal';
 import { buildBillHtml, buildKotHtml, getLogoDataUri } from '../services/printerMiddleware';
 import { previewReceipt } from '../services/printerService';
@@ -39,8 +38,10 @@ function formatOrderItemLine(item: OrderItem): string {
 }
 
 export default function ManageOrders({ onNewOrder, onEditOrder }: ManageOrdersProps) {
-  const { orders, load } = useOrderStore();
+  const orderStore = useOrderStore();
+  const { orders, load } = orderStore;
   const { add: addSale } = useSalesStore();
+  const { ingest: ingestSale } = useSalesStore();
   const { items: menuItems, load: loadMenu } = useMenuStore();
   const [selectedOrderId, setSelectedOrderId] = useState<string>('');
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('Cash');
@@ -137,18 +138,7 @@ export default function ManageOrders({ onNewOrder, onEditOrder }: ManageOrdersPr
       return;
     }
 
-    await saveOrderUpdate(selectedOrder.id, {
-      type: selectedOrder.type,
-      customerName: selectedOrder.customerName,
-      items: selectedOrder.items,
-      paymentMethod,
-      cashAmount: nextCash,
-      upiAmount: nextUpi,
-      note: selectedOrder.note,
-      status: 'Completed',
-      completedAt: new Date().toISOString(),
-    });
-
+    // Build sale data BEFORE calling complete so it's part of the atomic transaction
     const saleItems: SaleItem[] = selectedOrder.items
       .filter(item => item.countsInSales)
       .map(item => ({
@@ -187,7 +177,7 @@ export default function ManageOrders({ onNewOrder, onEditOrder }: ManageOrdersPr
       .map(item => `${item.qty}x ${item.name}`)
       .join(', ');
 
-    addSale({
+    const saleData = {
       orderCode: selectedOrder.code,
       date: todayISO(),
       time: nowTime(),
@@ -200,7 +190,18 @@ export default function ManageOrders({ onNewOrder, onEditOrder }: ManageOrdersPr
       upiAmount: saleUpi,
       note: [selectedOrder.note?.trim() ?? '', extraSummary ? `Extras: ${extraSummary}` : ''].filter(Boolean).join(' · ') || undefined,
       extraCharges: selectedOrder.extraCharges,
-    });
+    };
+
+    // One atomic DB transaction: marks order Completed + inserts sale
+    // Returns the created sale to update the UI without a re-fetch
+    const sale = await useOrderStore.getState().complete(
+      selectedOrder.id,
+      { method: paymentMethod, cashAmount: nextCash, upiAmount: nextUpi },
+      saleData
+    );
+
+    // Push the new sale directly into salesStore slices (already in DB)
+    ingestSale(sale);
 
     // cleanup served items from localStorage
     setServedItems(prev => {
@@ -215,8 +216,7 @@ export default function ManageOrders({ onNewOrder, onEditOrder }: ManageOrdersPr
     });
 
     showToast('Order completed', 'success');
-    await load();
-  }, [selectedOrder, paymentMethod, cashAmount, upiAmount, addSale, load]);
+  }, [selectedOrder, paymentMethod, cashAmount, upiAmount, ingestSale]);
 
   const [handleComplete, isCompleting] = useAsyncAction(completeAsync);
 
@@ -354,34 +354,13 @@ export default function ManageOrders({ onNewOrder, onEditOrder }: ManageOrdersPr
       extraCharges: selectedOrder.extraCharges,
     });
 
-    await saveOrderUpdate(selectedOrder.id, {
-      type: selectedOrder.type,
-      customerName: selectedOrder.customerName,
-      items: selectedOrder.items,
-      paymentMethod: selectedOrder.paymentMethod,
-      cashAmount: selectedOrder.cashAmount,
-      upiAmount: selectedOrder.upiAmount,
-      note: selectedOrder.note,
-      status: 'Cancelled',
-    });
-
-    // cleanup served items from localStorage
-    setServedItems(prev => {
-      const next = { ...prev };
-      Object.keys(next).forEach(k => {
-        if (k.startsWith(`${selectedOrder.code}-`)) {
-          delete next[k];
-        }
-      });
-      localStorage.setItem('served_items', JSON.stringify(next));
-      return next;
-    });
+    // Remove order from store — it's cancelled so it leaves the live board
+    await useOrderStore.getState().remove(selectedOrder.id);
 
     showToast('Order cancelled', 'success');
     setSelectedOrderId('');
     setCancelConfirmOpen(false);
-    await load();
-  }, [selectedOrder, addSale, load]);
+  }, [selectedOrder, addSale]);
 
   const [handleCancelOrder, isCancelling] = useAsyncAction(cancelAsync);
 

@@ -1,5 +1,9 @@
 import type { Addon, MenuItem } from '../types';
-import { dbGetMenuCategories, dbGetMenuItems, dbSaveMenuCategories, dbSaveMenuItems } from './db';
+import {
+  dbGetMenuCategories, dbGetMenuItems, dbSaveMenuCategories,
+  dbInsertMenuItem, dbUpdateMenuItem, dbDeleteMenuItem,
+  dbUpsertMenuCategory, dbDeleteMenuCategory,
+} from './db';
 import { v4 as uuid } from '../utils/uuid';
 
 function sortMenuItems(items: MenuItem[], categories: string[]): MenuItem[] {
@@ -13,6 +17,7 @@ function sortMenuItems(items: MenuItem[], categories: string[]): MenuItem[] {
   });
 }
 
+/** Full-table read — only used on initial load. */
 export async function getMenuItems(): Promise<MenuItem[]> {
   const [items, categories] = await Promise.all([dbGetMenuItems(), dbGetMenuCategories()]);
   return sortMenuItems(items, categories);
@@ -27,98 +32,184 @@ export async function getMenuData(): Promise<{ items: MenuItem[]; categories: st
   return { items: sortMenuItems(items, categories), categories };
 }
 
-export async function addMenuItem(data: Omit<MenuItem, 'id' | 'createdAt' | 'isActive'> & { isActive?: boolean }): Promise<MenuItem> {
-  const [items, categories] = await Promise.all([dbGetMenuItems(), dbGetMenuCategories()]);
-  if (!categories.includes(data.category)) {
-    await dbSaveMenuCategories([...categories, data.category]);
+/**
+ * Add a menu item.
+ * @param data          Item data (without id/createdAt/isActive).
+ * @param currentItems  Current in-memory items from the store.
+ * @param currentCats   Current in-memory categories from the store.
+ * @returns             { item, nextItems, nextCategories }
+ */
+export async function addMenuItem(
+  data: Omit<MenuItem, 'id' | 'createdAt' | 'isActive'> & { isActive?: boolean },
+  currentItems: MenuItem[],
+  currentCats: string[]
+): Promise<{ item: MenuItem; nextItems: MenuItem[]; nextCategories: string[] }> {
+  let nextCategories = currentCats;
+
+  // If category is new, upsert it (targeted write, no full DELETE)
+  if (!currentCats.includes(data.category)) {
+    await dbUpsertMenuCategory(data.category, currentCats.length);
+    nextCategories = [...currentCats, data.category];
   }
-  const item: MenuItem = { ...data, id: uuid(), createdAt: new Date().toISOString(), isActive: data.isActive ?? true };
-  await dbSaveMenuItems([...items, item]);
-  return item;
+
+  const item: MenuItem = {
+    ...data,
+    id: uuid(),
+    createdAt: new Date().toISOString(),
+    isActive: data.isActive ?? true,
+  };
+  await dbInsertMenuItem(item);
+
+  const nextItems = sortMenuItems([...currentItems, item], nextCategories);
+  return { item, nextItems, nextCategories };
 }
 
-export async function updateMenuItem(id: string, updates: Partial<Omit<MenuItem, 'id' | 'createdAt'>>): Promise<MenuItem> {
-  const [items, categories] = await Promise.all([dbGetMenuItems(), dbGetMenuCategories()]);
-  const idx = items.findIndex(i => i.id === id);
+/**
+ * Update a menu item.
+ * @param id            Item id.
+ * @param updates       Partial fields to apply.
+ * @param currentItems  Current in-memory items from the store.
+ * @param currentCats   Current in-memory categories from the store.
+ * @returns             { item, nextItems, nextCategories }
+ */
+export async function updateMenuItem(
+  id: string,
+  updates: Partial<Omit<MenuItem, 'id' | 'createdAt'>>,
+  currentItems: MenuItem[],
+  currentCats: string[]
+): Promise<{ item: MenuItem; nextItems: MenuItem[]; nextCategories: string[] }> {
+  const idx = currentItems.findIndex(i => i.id === id);
   if (idx === -1) throw new Error('Item not found');
-  items[idx] = { ...items[idx], ...updates };
-  if (updates.category && !categories.includes(updates.category)) {
-    await dbSaveMenuCategories([...categories, updates.category]);
+
+  const item: MenuItem = { ...currentItems[idx], ...updates };
+  let nextCategories = currentCats;
+
+  // If category changed to a new one, upsert it
+  if (updates.category && !currentCats.includes(updates.category)) {
+    await dbUpsertMenuCategory(updates.category, currentCats.length);
+    nextCategories = [...currentCats, updates.category];
   }
-  await dbSaveMenuItems(items);
-  return items[idx];
+
+  await dbUpdateMenuItem(id, item);
+
+  const nextItems = sortMenuItems(currentItems.map((it, i) => (i === idx ? item : it)), nextCategories);
+  return { item, nextItems, nextCategories };
 }
 
-export async function deleteMenuItem(id: string): Promise<void> {
-  const items = await dbGetMenuItems();
-  await dbSaveMenuItems(items.filter(i => i.id !== id));
+/**
+ * Delete a menu item.
+ * @returns { nextItems }
+ */
+export async function deleteMenuItem(
+  id: string,
+  currentItems: MenuItem[]
+): Promise<{ nextItems: MenuItem[] }> {
+  await dbDeleteMenuItem(id);
+  return { nextItems: currentItems.filter(i => i.id !== id) };
 }
 
-export async function addMenuCategory(name: string): Promise<string[]> {
+/**
+ * Add a category (targeted INSERT OR REPLACE, no full DELETE).
+ */
+export async function addMenuCategory(
+  name: string,
+  currentCats: string[]
+): Promise<string[]> {
   const trimmed = name.trim();
-  if (!trimmed) return dbGetMenuCategories();
-  const categories = await dbGetMenuCategories();
-  const exists = categories.some(cat => cat.toLowerCase() === trimmed.toLowerCase());
-  if (exists) return categories;
-  const next = [...categories, trimmed];
-  await dbSaveMenuCategories(next);
-  return next;
+  if (!trimmed) return currentCats;
+  const exists = currentCats.some(c => c.toLowerCase() === trimmed.toLowerCase());
+  if (exists) return currentCats;
+  await dbUpsertMenuCategory(trimmed, currentCats.length);
+  return [...currentCats, trimmed];
 }
 
-export async function renameCategory(oldName: string, newName: string): Promise<void> {
+/**
+ * Rename a category — touches all items in that category.
+ * Still requires full-table writes for items + categories (infrequent, acceptable).
+ */
+export async function renameCategory(
+  oldName: string,
+  newName: string,
+  currentItems: MenuItem[],
+  currentCats: string[]
+): Promise<{ nextItems: MenuItem[]; nextCategories: string[] }> {
   const trimmed = newName.trim();
-  if (!trimmed || trimmed === oldName) return;
-  const [items, categories] = await Promise.all([dbGetMenuItems(), dbGetMenuCategories()]);
-  const conflict = categories.some(cat => cat.toLowerCase() === trimmed.toLowerCase() && cat !== oldName);
+  if (!trimmed || trimmed === oldName) return { nextItems: currentItems, nextCategories: currentCats };
+  const conflict = currentCats.some(c => c.toLowerCase() === trimmed.toLowerCase() && c !== oldName);
   if (conflict) throw new Error('A category with that name already exists');
-  const nextCategories = categories.map(cat => (cat === oldName ? trimmed : cat));
-  const nextItems = items.map(item => (item.category === oldName ? { ...item, category: trimmed } : item));
+
+  const nextCategories = currentCats.map(c => (c === oldName ? trimmed : c));
+  const nextItems = currentItems.map(item => (item.category === oldName ? { ...item, category: trimmed } : item));
+
+  // Rename requires bulk update — use existing full-save helpers (infrequent)
   await dbSaveMenuCategories(nextCategories);
-  await dbSaveMenuItems(nextItems);
+  for (const item of nextItems) {
+    if (item.category === trimmed && currentItems.find(i => i.id === item.id)?.category === oldName) {
+      await dbUpdateMenuItem(item.id, item);
+    }
+  }
+
+  return { nextItems, nextCategories };
 }
 
-export async function removeCategory(name: string): Promise<void> {
-  const [items, categories] = await Promise.all([dbGetMenuItems(), dbGetMenuCategories()]);
-  await dbSaveMenuCategories(categories.filter(cat => cat !== name));
-  await dbSaveMenuItems(items.filter(item => item.category !== name));
+/**
+ * Remove a category and all its items.
+ */
+export async function removeCategory(
+  name: string,
+  currentItems: MenuItem[],
+  currentCats: string[]
+): Promise<{ nextItems: MenuItem[]; nextCategories: string[] }> {
+  // Delete items in this category
+  const toDelete = currentItems.filter(i => i.category === name);
+  for (const item of toDelete) {
+    await dbDeleteMenuItem(item.id);
+  }
+  await dbDeleteMenuCategory(name);
+
+  return {
+    nextItems: currentItems.filter(i => i.category !== name),
+    nextCategories: currentCats.filter(c => c !== name),
+  };
 }
 
 // ── Add-on helpers ──────────────────────────────────────
 
 export async function addAddonToItem(
   itemId: string,
-  data: Omit<Addon, 'id'>
-): Promise<void> {
-  const items = await dbGetMenuItems();
-  const idx = items.findIndex(i => i.id === itemId);
+  data: Omit<Addon, 'id'>,
+  currentItems: MenuItem[]
+): Promise<{ nextItems: MenuItem[] }> {
+  const idx = currentItems.findIndex(i => i.id === itemId);
   if (idx === -1) throw new Error('Item not found');
   const newAddon: Addon = { ...data, id: uuid() };
-  items[idx] = { ...items[idx], addons: [...(items[idx].addons ?? []), newAddon] };
-  await dbSaveMenuItems(items);
+  const item = { ...currentItems[idx], addons: [...(currentItems[idx].addons ?? []), newAddon] };
+  await dbUpdateMenuItem(itemId, item);
+  return { nextItems: currentItems.map((it, i) => (i === idx ? item : it)) };
 }
 
 export async function updateAddonOnItem(
   itemId: string,
   addonId: string,
-  data: Partial<Omit<Addon, 'id'>>
-): Promise<void> {
-  const items = await dbGetMenuItems();
-  const idx = items.findIndex(i => i.id === itemId);
+  data: Partial<Omit<Addon, 'id'>>,
+  currentItems: MenuItem[]
+): Promise<{ nextItems: MenuItem[] }> {
+  const idx = currentItems.findIndex(i => i.id === itemId);
   if (idx === -1) throw new Error('Item not found');
-  const addons = (items[idx].addons ?? []).map(a =>
-    a.id === addonId ? { ...a, ...data } : a
-  );
-  items[idx] = { ...items[idx], addons };
-  await dbSaveMenuItems(items);
+  const addons = (currentItems[idx].addons ?? []).map(a => (a.id === addonId ? { ...a, ...data } : a));
+  const item = { ...currentItems[idx], addons };
+  await dbUpdateMenuItem(itemId, item);
+  return { nextItems: currentItems.map((it, i) => (i === idx ? item : it)) };
 }
 
 export async function removeAddonFromItem(
   itemId: string,
-  addonId: string
-): Promise<void> {
-  const items = await dbGetMenuItems();
-  const idx = items.findIndex(i => i.id === itemId);
+  addonId: string,
+  currentItems: MenuItem[]
+): Promise<{ nextItems: MenuItem[] }> {
+  const idx = currentItems.findIndex(i => i.id === itemId);
   if (idx === -1) throw new Error('Item not found');
-  items[idx] = { ...items[idx], addons: (items[idx].addons ?? []).filter(a => a.id !== addonId) };
-  await dbSaveMenuItems(items);
+  const item = { ...currentItems[idx], addons: (currentItems[idx].addons ?? []).filter(a => a.id !== addonId) };
+  await dbUpdateMenuItem(itemId, item);
+  return { nextItems: currentItems.map((it, i) => (i === idx ? item : it)) };
 }

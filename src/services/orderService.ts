@@ -1,5 +1,5 @@
-import type { Order, OrderItem, PaymentMethod } from '../types';
-import { dbGetOrders, dbSaveOrders, dbGetSales } from './db';
+import type { Order, OrderItem, PaymentMethod, Sale } from '../types';
+import { dbGetOrders, dbInsertOrder, dbUpdateOrder, dbDeleteOrder, dbGetActiveOrders, dbCompleteOrderAndAddSale } from './db';
 import { v4 as uuid } from '../utils/uuid';
 
 function sortOrders(orders: Order[]): Order[] {
@@ -11,24 +11,31 @@ export function calculateOrderTotal(items: OrderItem[], discount: number = 0): n
   return Math.max(0, subtotal - (discount ?? 0));
 }
 
+/** Full-table read — only used on initial load. */
 export async function getOrders(): Promise<Order[]> {
   const orders = await dbGetOrders();
   return sortOrders(orders);
 }
 
-export async function addOrder(data: Omit<Order, 'id' | 'code' | 'createdAt' | 'updatedAt' | 'completedAt' | 'status'> & { status?: Order['status'] }): Promise<Order> {
-  const orders = await dbGetOrders();
+/** Fetch only active orders (Open status). */
+export async function getActiveOrders(): Promise<Order[]> {
+  const orders = await dbGetActiveOrders();
+  return sortOrders(orders);
+}
 
-  // Collect all existing order codes from open/completed orders and sales to ensure uniqueness
+/**
+ * Add a new order.
+ * @param data          Order data (without id/code/timestamps).
+ * @param currentOrders Current in-memory orders from the store (avoids a DB read).
+ * @returns             { order, nextOrders } — the new order + updated sorted array.
+ */
+export async function addOrder(
+  data: Omit<Order, 'id' | 'code' | 'createdAt' | 'updatedAt' | 'completedAt' | 'status'> & { status?: Order['status'] },
+  currentOrders: Order[]
+): Promise<{ order: Order; nextOrders: Order[] }> {
+  // Collect existing codes from in-memory orders only (codes are session-scoped identifiers)
   const existingCodes = new Set<string>();
-  orders.forEach(o => { if (o.code) existingCodes.add(o.code.toUpperCase()); });
-
-  try {
-    const sales = await dbGetSales();
-    sales.forEach(s => { if (s.orderCode) existingCodes.add(s.orderCode.toUpperCase()); });
-  } catch (err) {
-    console.warn('Failed to load sales for order code uniqueness check', err);
-  }
+  currentOrders.forEach(o => { if (o.code) existingCodes.add(o.code.toUpperCase()); });
 
   // Generate a unique 6-character alphanumeric code
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -39,16 +46,10 @@ export async function addOrder(data: Omit<Order, 'id' | 'code' | 'createdAt' | '
     for (let i = 0; i < 6; i++) {
       code += chars.charAt(Math.floor(Math.random() * chars.length));
     }
-    if (!existingCodes.has(code)) {
-      generatedCode = code;
-      break;
-    }
+    if (!existingCodes.has(code)) { generatedCode = code; break; }
     attempts++;
   }
-  if (!generatedCode) {
-    // Extreme fallback if somehow collision storm happens
-    generatedCode = `ORD-${Date.now().toString().slice(-4)}`;
-  }
+  if (!generatedCode) generatedCode = `ORD-${Date.now().toString().slice(-4)}`;
 
   const now = new Date().toISOString();
   const order: Order = {
@@ -59,33 +60,68 @@ export async function addOrder(data: Omit<Order, 'id' | 'code' | 'createdAt' | '
     createdAt: now,
     updatedAt: now,
   };
-  await dbSaveOrders(sortOrders([...orders, order]));
-  return order;
+
+  // Single targeted INSERT — no full-table write
+  await dbInsertOrder(order);
+
+  const nextOrders = sortOrders([...currentOrders, order]);
+  return { order, nextOrders };
 }
 
-export async function updateOrder(id: string, updates: Partial<Omit<Order, 'id' | 'code' | 'createdAt' | 'updatedAt'>>): Promise<Order> {
-  const orders = await dbGetOrders();
-  const idx = orders.findIndex(order => order.id === id);
+/**
+ * Update a single order.
+ * @param id            Order id to update.
+ * @param updates       Partial fields to apply.
+ * @param currentOrders Current in-memory orders from the store.
+ * @returns             { order, nextOrders }
+ */
+export async function updateOrder(
+  id: string,
+  updates: Partial<Omit<Order, 'id' | 'code' | 'createdAt' | 'updatedAt'>>,
+  currentOrders: Order[]
+): Promise<{ order: Order; nextOrders: Order[] }> {
+  const idx = currentOrders.findIndex(o => o.id === id);
   if (idx === -1) throw new Error('Order not found');
+
   const now = new Date().toISOString();
-  orders[idx] = {
-    ...orders[idx],
-    ...updates,
-    updatedAt: now,
-  };
-  await dbSaveOrders(sortOrders(orders));
-  return orders[idx];
+  const order: Order = { ...currentOrders[idx], ...updates, updatedAt: now };
+
+  await dbUpdateOrder(id, order);
+
+  const nextOrders = sortOrders(currentOrders.map((o, i) => (i === idx ? order : o)));
+  return { order, nextOrders };
 }
 
-export async function completeOrder(id: string, payment: { method: PaymentMethod; cashAmount?: number; upiAmount?: number }): Promise<Order> {
-  const orders = await dbGetOrders();
-  const idx = orders.findIndex(order => order.id === id);
+/**
+ * Atomically complete an order AND create the corresponding sale record.
+ * Both writes go into a single SQLite transaction — if either fails, both
+ * roll back, so the DB stays consistent.
+ *
+ * @param id            Order id to complete.
+ * @param payment       Payment method + split amounts.
+ * @param saleData      Pre-built sale data (items, amount, channel, etc.).
+ * @param currentOrders Current in-memory orders from the store.
+ * @returns             { order, sale } so stores can update without re-fetch.
+ */
+export async function completeOrder(
+  id: string,
+  payment: { method: PaymentMethod; cashAmount?: number; upiAmount?: number },
+  saleData: Omit<Sale, 'id' | 'createdAt'>,
+  currentOrders: Order[]
+): Promise<{ order: Order; sale: Sale }> {
+  const idx = currentOrders.findIndex(o => o.id === id);
   if (idx === -1) throw new Error('Order not found');
 
   const now = new Date().toISOString();
-  const total = calculateOrderTotal(orders[idx].items, orders[idx].discount ?? 0);
-  orders[idx] = {
-    ...orders[idx],
+  const total = calculateOrderTotal(currentOrders[idx].items, currentOrders[idx].discount ?? 0);
+
+  const paid = (payment.cashAmount ?? 0) + (payment.upiAmount ?? 0);
+  if (payment.method === 'Both' && Math.round(paid) !== Math.round(total)) {
+    throw new Error('Split payment must match the order total');
+  }
+
+  const order: Order = {
+    ...currentOrders[idx],
     status: 'Completed',
     paymentMethod: payment.method,
     cashAmount: payment.cashAmount,
@@ -94,16 +130,19 @@ export async function completeOrder(id: string, payment: { method: PaymentMethod
     updatedAt: now,
   };
 
-  const paid = (payment.cashAmount ?? 0) + (payment.upiAmount ?? 0);
-  if (payment.method === 'Both' && Math.round(paid) !== Math.round(total)) {
-    throw new Error('Split payment must match the order total');
-  }
+  const sale: Sale = { ...saleData, id: uuid(), createdAt: now };
 
-  await dbSaveOrders(sortOrders(orders));
-  return orders[idx];
+  // One atomic transaction: order completion + sale creation
+  await dbCompleteOrderAndAddSale(order, sale);
+
+  return { order, sale };
 }
 
-export async function deleteOrder(id: string): Promise<void> {
-  const orders = await dbGetOrders();
-  await dbSaveOrders(orders.filter(order => order.id !== id));
+/**
+ * Delete a single order.
+ * @returns nextOrders — filtered array for the store.
+ */
+export async function deleteOrder(id: string, currentOrders: Order[]): Promise<Order[]> {
+  await dbDeleteOrder(id);
+  return currentOrders.filter(o => o.id !== id);
 }

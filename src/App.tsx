@@ -9,11 +9,11 @@ import ManageOrders from './pages/ManageOrders';
 import mascot from './assets/aalsi-chatore-mascot.png';
 import type { Addon, MenuItem, Order, PaymentMethod, Sale, SaleItem } from './types';
 import { isTauri } from './utils/tauri';
-import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { open as openDialog, save as saveDialog, message as messageDialog } from '@tauri-apps/plugin-dialog';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { check } from '@tauri-apps/plugin-updater';
 import { APP_CONFIG } from './config/appConfig';
 import { setTestingMode, isTestingMode as dbIsTesting, clearCurrentDatabase, isAnalyticsExperimentalEnabled, setAnalyticsExperimentalEnabled, getSetting, setSetting } from './services/db';
-import * as salesService from './services/salesService';
 import { todayISO, nowTime } from './utils/dateUtils';
 import { exportSalesXLSXForDate, exportSalesPDFForDate } from './utils/exportUtils';
 import { suggestHindiName } from './utils/hindi';
@@ -158,7 +158,11 @@ export default function App() {
     setOrderFormOrder(null);
   };
 
-  const loadSales = useSalesStore(s => s.load);
+  const loadTodaySales = useSalesStore(s => s.loadToday);
+  const loadYesterdaySalesSum = useSalesStore(s => s.loadYesterdaySum);
+  const addSaleToStore = useSalesStore(s => s.add);
+  const updateSaleInStore = useSalesStore(s => s.update);
+  const removeSaleFromStore = useSalesStore(s => s.remove);
   const loadMenu  = useMenuStore(s => s.load);
   const addMenu = useMenuStore(s => s.add);
   const removeMenu = useMenuStore(s => s.remove);
@@ -170,13 +174,19 @@ export default function App() {
   const updateAddonInStore = useMenuStore(s => s.updateAddon);
   const removeAddonFromStore = useMenuStore(s => s.removeAddon);
   const menuCategories = useMenuStore(s => s.categories);
-  const sales = useSalesStore(s => s.sales);
+
+  const todaySales = useSalesStore(s => s.todaySales);
+  const yesterdaySalesSum = useSalesStore(s => s.yesterdaySalesSum);
+  const ledgerSales = useSalesStore(s => s.ledgerSales);
+  const analyticsSales = useSalesStore(s => s.analyticsSales);
+
   const menuItems = useMenuStore(s => s.items);
-  const todaySales = useMemo(() => sales.filter(sale => sale.date === todayISO() && sale.paymentMethod !== 'Cancelled'), [sales]);
-  const yesterdaySales = useMemo(() => sales.filter(sale => sale.date === yesterdayISO() && sale.paymentMethod !== 'Cancelled'), [sales]);
+
+  const todaySalesFiltered = useMemo(() => todaySales.filter(sale => sale.paymentMethod !== 'Cancelled'), [todaySales]);
+
   const topDishNames = useMemo(() => {
     const counts = new Map<string, number>();
-    todaySales.forEach(sale => {
+    todaySalesFiltered.forEach(sale => {
       sale.items.forEach(item => {
         counts.set(item.name, (counts.get(item.name) ?? 0) + item.qty);
       });
@@ -186,17 +196,15 @@ export default function App() {
       .sort((left, right) => right[1] - left[1])
       .slice(0, 3)
       .map(([name]) => name);
-  }, [todaySales]);
+  }, [todaySalesFiltered]);
+
   const recentSales = useMemo(
-    () => [...todaySales].sort((left, right) => `${right.date} ${right.time}`.localeCompare(`${left.date} ${left.time}`)).slice(0, 10),
-    [todaySales]
+    () => [...todaySalesFiltered].sort((left, right) => `${right.date} ${right.time}`.localeCompare(`${left.date} ${left.time}`)).slice(0, 10),
+    [todaySalesFiltered]
   );
-  const ledgerRows = sales;
+
   const ledgerDate = ledgerDatePreset === 'Today' ? todayISO() : ledgerDatePreset === 'Yesterday' ? yesterdayISO() : ledgerCustomDate;
-  const filteredLedgerRows = useMemo(
-    () => ledgerRows.filter(sale => sale.date === ledgerDate),
-    [ledgerRows, ledgerDate]
-  );
+  const filteredLedgerRows = ledgerSales;
 
   // Analytics helpers
   function rangeToDates(range: AnalyticsRange) {
@@ -220,7 +228,7 @@ export default function App() {
   const analyticsData = useMemo<AnalyticsData>(() => {
     const { start, end } = rangeToDates(analyticsRange);
     // filter sales between start..end inclusive (excluding cancelled sales)
-    const sel = sales.filter(s => s.date >= start && s.date <= end && s.paymentMethod !== 'Cancelled');
+    const sel = analyticsSales.filter(s => s.paymentMethod !== 'Cancelled');
 
     // Metrics (total, orders, top items, pie) are computed from the date range only
     const totalSales = sel.reduce((acc, s) => acc + (s.amount ?? 0), 0);
@@ -287,7 +295,7 @@ export default function App() {
     }
 
     return { totalSales, totalOrders, topItems, chartData, pieData };
-  }, [sales, analyticsRange, analyticsScope, analyticsCategory, analyticsItemId, menuItems]);
+  }, [analyticsSales, analyticsRange, analyticsScope, analyticsCategory, analyticsItemId, menuItems]);
 
   // synchronous suggestions handled inline to keep UI behavior simple
 
@@ -344,9 +352,8 @@ export default function App() {
     }
   };
 
-  const refreshLedger = async () => {
-    await loadSales();
-  };
+
+
 
   const insertLedgerRow = async (
     anchorSale: Sale | null,
@@ -357,20 +364,22 @@ export default function App() {
       ? shiftSaleDateTime(anchorSale.date, anchorSale.time, direction === 'above' ? 1 : direction === 'below' ? -1 : 0)
       : { date: fallbackDate, time: nowTime() };
 
-    await salesService.addSale({
-      date: shifted.date,
-      time: shifted.time,
-      items: [],
-      amount: 0,
-      paymentMethod: 'Cash',
-    });
-    await refreshLedger();
-    showToast(direction === 'append' ? 'Row added' : `Row inserted ${direction}`, 'success');
+    try {
+      await addSaleToStore({
+        date: shifted.date,
+        time: shifted.time,
+        items: [],
+        amount: 0,
+        paymentMethod: 'Cash',
+      });
+      showToast(direction === 'append' ? 'Row added' : `Row inserted ${direction}`, 'success');
+    } catch {
+      showToast('Failed to insert row', 'error');
+    }
   };
 
-  const deleteLedgerRow = async (saleId: string) => {
-    await salesService.deleteSale(saleId);
-    await refreshLedger();
+  const deleteLedgerRow = (saleId: string) => {
+    removeSaleFromStore(saleId);
     showToast('Row deleted', 'info');
   };
 
@@ -389,13 +398,10 @@ export default function App() {
     setLedgerEdit(null);
   };
 
-  const saveLedgerEdit = async () => {
+  const saveLedgerEdit = () => {
     if (!ledgerEdit) return;
-    const sale = sales.find(row => row.id === ledgerEdit.saleId);
-    if (!sale) {
-      setLedgerEdit(null);
-      return;
-    }
+    const sale = ledgerSales.find(row => row.id === ledgerEdit.saleId) || todaySales.find(row => row.id === ledgerEdit.saleId);
+    if (!sale) { setLedgerEdit(null); return; }
 
     const nextValue = ledgerEdit.value.trim();
     let updates: Partial<Omit<Sale, 'id' | 'createdAt'>> | null = null;
@@ -440,15 +446,201 @@ export default function App() {
 
     if (!updates) return;
 
-    try {
-      await salesService.updateSale(sale.id, updates);
-      await refreshLedger();
-      showToast('Row updated', 'success');
-      setLedgerEdit(null);
-    } catch (error) {
-      console.warn('Failed to update ledger row', error);
-      showToast('Failed to update row', 'error');
+    // Route through immediate store update
+    updateSaleInStore(sale.id, updates);
+    showToast('Row updated', 'success');
+    setLedgerEdit(null);
+  };
+
+  const [backupUrl, setBackupUrl] = useState(() => localStorage.getItem('restrosales__backupUrl') || '');
+  const [lastBackupTime, setLastBackupTime] = useState(() => localStorage.getItem('restrosales__lastBackupTime') || null);
+  const [isBackuping, setIsBackuping] = useState(false);
+
+  const [isGDriveConnected, setIsGDriveConnected] = useState(false);
+  const [isGDriveSyncing, setIsGDriveSyncing] = useState(false);
+  const [gdriveLastSync, setGdriveLastSync] = useState<string | null>(null);
+  const [gdriveAutoSyncStartup, setGdriveAutoSyncStartup] = useState(false);
+  const [gdriveAutoSyncShutdown, setGdriveAutoSyncShutdown] = useState(false);
+
+  const handleBackupUrlChange = (url: string) => {
+    setBackupUrl(url);
+    localStorage.setItem('restrosales__backupUrl', url);
+  };
+
+  const handleBackupOnline = async () => {
+    if (!backupUrl.trim()) {
+      showToast('Please enter a backup URL', 'error');
+      return;
     }
+    setIsBackuping(true);
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const bytes = await invoke<number[]>('get_db_file_bytes', { isTest: dbIsTesting() });
+      const uint8 = new Uint8Array(bytes);
+      const dbFilename = dbIsTesting() ? 'aalsi_chatore_test.db' : 'aalsi_chatore.db';
+
+      const response = await fetch(backupUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-sqlite3',
+          'Content-Disposition': `attachment; filename="${dbFilename}"`,
+        },
+        body: uint8,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Server returned ${response.status} ${response.statusText}`);
+      }
+
+      const now = new Date().toISOString();
+      setLastBackupTime(now);
+      localStorage.setItem('restrosales__lastBackupTime', now);
+      showToast('Database backup successfully uploaded online', 'success');
+    } catch (err) {
+      console.error('Online backup failed', err);
+      showToast(err instanceof Error ? err.message : 'Online backup failed', 'error');
+    } finally {
+      setIsBackuping(false);
+    }
+  };
+
+  const handleExportBackup = async () => {
+    try {
+      const destPath = await saveDialog({
+        filters: [{ name: 'SQLite Database', extensions: ['db'] }],
+        defaultPath: `backup-${new Date().toISOString().slice(0, 10)}.db`,
+      });
+
+      if (!destPath) return; // user cancelled
+
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('export_db_file', { destPath, isTest: dbIsTesting() });
+      showToast('Database file exported successfully', 'success');
+    } catch (err) {
+      console.error('Database export failed', err);
+      showToast('Database export failed', 'error');
+    }
+  };
+
+  const handleImportBackup = async () => {
+    try {
+      const srcPath = await openDialog({
+        multiple: false,
+        filters: [{ name: 'SQLite Database', extensions: ['db'] }],
+      });
+
+      if (!srcPath || Array.isArray(srcPath)) return; // user cancelled
+
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('import_db_file', { srcPath, isTest: dbIsTesting() });
+
+      await messageDialog('Database restored successfully! Please restart the application to apply the changes.', {
+        title: 'Database Restored',
+        kind: 'info',
+      });
+    } catch (err) {
+      console.error('Database import failed', err);
+      showToast('Database import failed', 'error');
+    }
+  };
+
+  const handleConnectGDrive = async () => {
+    try {
+      const { getAuthUrl, exchangeAuthCode } = await import('./services/googleDriveService');
+      const url = getAuthUrl();
+
+      showToast('Please sign in to Google in your browser...', 'info');
+
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('open_in_browser', { url });
+
+      const code = await invoke<string>('start_oauth_listener');
+      showToast('Authenticating with Google...', 'info');
+
+      await exchangeAuthCode(code);
+      setIsGDriveConnected(true);
+      showToast('Google Drive account linked successfully!', 'success');
+
+      // Trigger initial backup sync
+      void handleSyncGDriveNow();
+    } catch (err) {
+      console.error('Google Drive link failed', err);
+      showToast(err instanceof Error ? err.message : 'Failed to link Google Drive', 'error');
+    }
+  };
+
+  const handleDisconnectGDrive = async () => {
+    try {
+      const { clearTokens } = await import('./services/googleDriveService');
+      await clearTokens();
+      setIsGDriveConnected(false);
+      showToast('Google Drive account disconnected.', 'success');
+    } catch (err) {
+      showToast('Failed to disconnect Google Drive', 'error');
+    }
+  };
+
+  const handleSyncGDriveNowBackground = async () => {
+    try {
+      const { getValidAccessToken, uploadBackupFile } = await import('./services/googleDriveService');
+      const token = await getValidAccessToken();
+      if (!token) return;
+
+      const { invoke } = await import('@tauri-apps/api/core');
+      const bytes = await invoke<number[]>('get_db_file_bytes', { isTest: dbIsTesting() });
+      const uint8 = new Uint8Array(bytes);
+
+      await uploadBackupFile(token, uint8, dbIsTesting());
+
+      const now = new Date().toISOString();
+      await setSetting('gdrive_last_sync_time', now);
+      setGdriveLastSync(now);
+    } catch (err) {
+      console.warn('Background GDrive sync failed', err);
+    }
+  };
+
+  const handleSyncGDriveNow = async () => {
+    setIsGDriveSyncing(true);
+    try {
+      const { getValidAccessToken, uploadBackupFile } = await import('./services/googleDriveService');
+      const token = await getValidAccessToken();
+      if (!token) {
+        showToast('Google Drive account not connected or session expired.', 'error');
+        setIsGDriveConnected(false);
+        return;
+      }
+
+      showToast('Starting Google Drive sync...', 'info');
+
+      const { invoke } = await import('@tauri-apps/api/core');
+      const bytes = await invoke<number[]>('get_db_file_bytes', { isTest: dbIsTesting() });
+      const uint8 = new Uint8Array(bytes);
+
+      await uploadBackupFile(token, uint8, dbIsTesting());
+
+      const now = new Date().toISOString();
+      await setSetting('gdrive_last_sync_time', now);
+      setGdriveLastSync(now);
+      showToast('Database successfully synced to Google Drive!', 'success');
+    } catch (err) {
+      console.error('Manual GDrive sync failed', err);
+      showToast(err instanceof Error ? err.message : 'Google Drive sync failed', 'error');
+    } finally {
+      setIsGDriveSyncing(false);
+    }
+  };
+
+  const handleToggleGDriveAutoSyncStartup = async () => {
+    const nextVal = !gdriveAutoSyncStartup;
+    setGdriveAutoSyncStartup(nextVal);
+    await setSetting('gdrive_auto_sync_startup', String(nextVal));
+  };
+
+  const handleToggleGDriveAutoSyncShutdown = async () => {
+    const nextVal = !gdriveAutoSyncShutdown;
+    setGdriveAutoSyncShutdown(nextVal);
+    await setSetting('gdrive_auto_sync_shutdown', String(nextVal));
   };
 
   const checkForUpdates = async (autoInstall: boolean) => {
@@ -504,7 +696,8 @@ export default function App() {
       // reload stored data from the selected DB
       if (mounted) {
         try {
-          await loadSales();
+          await loadTodaySales();
+          await loadYesterdaySalesSum();
           await loadMenu();
         } catch (err) {
           // ignore
@@ -513,7 +706,94 @@ export default function App() {
     })();
 
     return () => { mounted = false; };
-  }, [testingMode, loadSales, loadMenu]);
+  }, [testingMode, loadTodaySales, loadYesterdaySalesSum, loadMenu]);
+
+  // Load Google Drive settings and handle auto-sync on startup
+  useEffect(() => {
+    let mounted = true;
+    void (async () => {
+      try {
+        const { loadTokens } = await import('./services/googleDriveService');
+        const tokens = await loadTokens();
+        const lastSync = await getSetting('gdrive_last_sync_time');
+        const autoStartup = (await getSetting('gdrive_auto_sync_startup')) === 'true';
+        const autoShutdown = (await getSetting('gdrive_auto_sync_shutdown')) === 'true';
+
+        if (mounted) {
+          setIsGDriveConnected(!!tokens);
+          setGdriveLastSync(lastSync);
+          setGdriveAutoSyncStartup(autoStartup);
+          setGdriveAutoSyncShutdown(autoShutdown);
+        }
+
+        if (tokens && autoStartup && mounted) {
+          void handleSyncGDriveNowBackground();
+        }
+      } catch (err) {
+        console.warn('Failed to load Google Drive settings', err);
+      }
+    })();
+
+    return () => { mounted = false; };
+  }, [testingMode]);
+
+  // Handle auto-sync on close / shutdown
+  useEffect(() => {
+    if (!isTauri()) return;
+
+    let unlistenFn: (() => void) | null = null;
+
+    const setupCloseListener = async () => {
+      const unlisten = await getCurrentWindow().onCloseRequested(async (event) => {
+        const autoShutdown = (await getSetting('gdrive_auto_sync_shutdown')) === 'true';
+        const hasToken = await getSetting('gdrive_refresh_token');
+
+        if (autoShutdown && hasToken) {
+          event.preventDefault();
+
+          try {
+            const { getValidAccessToken, uploadBackupFile } = await import('./services/googleDriveService');
+            const token = await getValidAccessToken();
+            if (token) {
+              const { invoke } = await import('@tauri-apps/api/core');
+              const bytes = await invoke<number[]>('get_db_file_bytes', { isTest: dbIsTesting() });
+              const uint8 = new Uint8Array(bytes);
+              await uploadBackupFile(token, uint8, dbIsTesting());
+
+              const now = new Date().toISOString();
+              await setSetting('gdrive_last_sync_time', now);
+            }
+          } catch (err) {
+            console.warn('Auto-sync on shutdown failed', err);
+          }
+
+          getCurrentWindow().destroy();
+        }
+      });
+      unlistenFn = unlisten;
+    };
+
+    void setupCloseListener();
+
+    return () => {
+      if (unlistenFn) unlistenFn();
+    };
+  }, []);
+
+  // Load ledger sales when ledgerDate or activeTab changes
+  useEffect(() => {
+    if (activeTab === 'ledger') {
+      void useSalesStore.getState().loadLedger(ledgerDate);
+    }
+  }, [activeTab, ledgerDate]);
+
+  // Load analytics sales when analyticsRange or activeTab changes
+  useEffect(() => {
+    if (activeTab === 'analytics') {
+      const { start, end } = rangeToDates(analyticsRange);
+      void useSalesStore.getState().loadAnalytics(start, end);
+    }
+  }, [activeTab, analyticsRange]);
 
   useEffect(() => {
     const trimmed = drawerName.trim();
@@ -779,7 +1059,8 @@ export default function App() {
     }
 
     setCleanDatabaseConfirmOpen(false);
-    await loadSales();
+    await loadTodaySales();
+    await loadYesterdaySalesSum();
     await loadMenu();
   };
 
@@ -867,7 +1148,7 @@ export default function App() {
 
           {activeTab === 'ledger' && (
             <LedgerTab
-              ledgerRows={ledgerRows}
+              ledgerRows={filteredLedgerRows}
               filteredLedgerRows={filteredLedgerRows}
               ledgerDate={ledgerDate}
               ledgerDatePreset={ledgerDatePreset}
@@ -906,8 +1187,8 @@ export default function App() {
 
           {activeTab === 'insights' && (
             <DashboardTab
-              todaySales={todaySales}
-              yesterdaySales={yesterdaySales}
+              todaySales={todaySalesFiltered}
+              yesterdaySalesSum={yesterdaySalesSum}
               topDishNames={topDishNames}
               recentSales={recentSales}
               onViewLedger={() => setActiveTab('ledger')}
@@ -952,6 +1233,23 @@ export default function App() {
               updateVersion={updateVersion}
               onCheckUpdates={() => void checkForUpdates(false)}
               onInstallUpdate={installUpdate}
+              backupUrl={backupUrl}
+              onBackupUrlChange={handleBackupUrlChange}
+              lastBackupTime={lastBackupTime}
+              isBackuping={isBackuping}
+              onBackupOnline={handleBackupOnline}
+              onDownloadBackup={() => void handleExportBackup()}
+              onRestoreBackup={() => void handleImportBackup()}
+              isGDriveConnected={isGDriveConnected}
+              isGDriveSyncing={isGDriveSyncing}
+              gdriveLastSync={gdriveLastSync}
+              gdriveAutoSyncStartup={gdriveAutoSyncStartup}
+              gdriveAutoSyncShutdown={gdriveAutoSyncShutdown}
+              onConnectGDrive={handleConnectGDrive}
+              onDisconnectGDrive={handleDisconnectGDrive}
+              onSyncGDriveNow={handleSyncGDriveNow}
+              onToggleGDriveAutoSyncStartup={handleToggleGDriveAutoSyncStartup}
+              onToggleGDriveAutoSyncShutdown={handleToggleGDriveAutoSyncShutdown}
             />
           )}
           {activeTab === 'settings' && (

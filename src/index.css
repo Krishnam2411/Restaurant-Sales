@@ -3331,3 +3331,93 @@ select.input-field {
     padding: 8px 10px;
   }
 }
+
+/* ── SyncStatusBar ───────────────────────────────────── */
+.sync-status-bar {
+  position: fixed;
+  bottom: 16px;
+  right: 20px;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  background: var(--cream);
+  border: 1px dashed var(--border);
+  border-radius: 999px;
+  box-shadow: 0 4px 16px rgba(90, 54, 22, 0.14);
+  font-size: var(--font-xs);
+  font-weight: 500;
+  color: var(--ink);
+  backdrop-filter: blur(6px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  user-select: none;
+}
+
+.sync-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.sync-dot--live    { background: #5cb85c; box-shadow: 0 0 0 2px rgba(92, 184, 92, 0.25); }
+.sync-dot--pending { background: var(--gold); animation: sync-pulse 1.4s ease-in-out infinite; }
+.sync-dot--syncing { background: #4a9de0; animation: sync-spin-dot 1s linear infinite; }
+.sync-dot--error   { background: var(--tomato); box-shadow: 0 0 0 2px rgba(215, 74, 46, 0.25); }
+
+@keyframes sync-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.4; }
+}
+@keyframes sync-spin-dot {
+  0%   { box-shadow: 0 0 0 2px rgba(74, 157, 224, 0.4); }
+  50%  { box-shadow: 0 0 0 4px rgba(74, 157, 224, 0.15); }
+  100% { box-shadow: 0 0 0 2px rgba(74, 157, 224, 0.4); }
+}
+
+.sync-label {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.sync-error-msg {
+  color: var(--tomato);
+  font-size: 0.78rem;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sync-btn {
+  border: none;
+  background: transparent;
+  color: var(--gold);
+  font-size: var(--font-xs);
+  font-weight: 600;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  transition: background 0.15s ease, color 0.15s ease;
+  white-space: nowrap;
+}
+.sync-btn:hover {
+  background: rgba(201, 139, 46, 0.12);
+}
+.sync-btn--retry {
+  color: var(--tomato);
+}
+.sync-btn--retry:hover {
+  background: rgba(215, 74, 46, 0.1);
+}
+.sync-btn--backup {
+  color: var(--muted);
+  border-left: 1px dashed var(--border);
+  padding-left: 10px;
+  margin-left: 2px;
+}
+.sync-btn--backup:hover {
+  color: var(--brown-dark);
+  background: rgba(122, 75, 31, 0.08);
+}
+

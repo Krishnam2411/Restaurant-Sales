@@ -5,11 +5,35 @@ import type { MenuItem, Order, OrderItem, Sale, SaleItem } from '../types';
 
 import { isTauri } from '../utils/tauri';
 import { appDataDir, join } from '@tauri-apps/api/path';
+import { invoke } from '@tauri-apps/api/core';
 
 type SqliteClient = {
   execute: (query: string, bindValues?: unknown[]) => Promise<unknown>;
   select: <T = Record<string, unknown>>(query: string, bindValues?: unknown[]) => Promise<T[]>;
 };
+
+/** A single SQL statement + its bind values, sent to the Rust batch command. */
+type SqlStatement = { sql: string; values: unknown[] };
+
+/**
+ * Execute multiple SQL statements atomically in a SINGLE SQLite transaction.
+ *
+ * Calls the Rust `db_execute_batch` command which acquires ONE connection from
+ * the pool and wraps all statements in BEGIN/COMMIT.  This bypasses the
+ * tauri-plugin-sql connection-pool fragmentation that breaks JS-level
+ * BEGIN/COMMIT/ROLLBACK.
+ */
+async function dbExecuteBatch(statements: SqlStatement[]): Promise<void> {
+  await invoke<{ ok: boolean }>('db_execute_batch', { statements, isTest: testingMode });
+}
+
+/**
+ * Execute a single write statement through our Rust pool.
+ * No transaction is needed for a single statement (it's always atomic).
+ */
+async function dbExecuteSingle(sql: string, values: unknown[]): Promise<void> {
+  await invoke<{ ok: boolean }>('db_execute_single', { sql, values, isTest: testingMode });
+}
 
 const LEGACY_DEFAULT_MENU_CATEGORIES = [
   'Breakfast',
@@ -30,6 +54,7 @@ let sqliteReady: Promise<void> | null = null;
 let sqliteUrl: string | null = null;
 const TESTING_MODE_KEY = 'restrosales__testingMode';
 const ANALYTICS_EXPERIMENTAL_KEY = 'restrosales__analyticsExperimental';
+
 
 function readPersistedTestingMode(): boolean {
   if (typeof window === 'undefined') return false;
@@ -385,6 +410,94 @@ export async function dbGetSales(): Promise<Sale[]> {
   }));
 }
 
+export async function dbGetSalesForRange(from: string, to: string): Promise<Sale[]> {
+  if (!isTauri()) return [];
+  await ensureSqlite();
+  if (!sqlite) return [];
+
+  const salesRows = await sqlite.select<{
+    id: string;
+    order_code?: string | null;
+    date: string;
+    time: string;
+    subtotal?: number;
+    discount?: number;
+    tax_rate?: number;
+    tax_amount?: number;
+    total_amount?: number;
+    amount: number;
+    payment_method: string;
+    cash_amount?: number | null;
+    upi_amount?: number | null;
+    channel?: string | null;
+    note: string | null;
+    created_at: string;
+    extra_charges?: string | null;
+  }>(
+    'SELECT * FROM sales WHERE date >= ? AND date <= ? ORDER BY date DESC, time DESC',
+    [from, to]
+  );
+
+  const itemRows = await sqlite.select<{
+    id: string;
+    sale_id: string;
+    menu_item_id: string | null;
+    name: string;
+    qty: number;
+    unit_price: number;
+    addons: string | null;
+  }>(
+    'SELECT * FROM sale_items WHERE sale_id IN (SELECT id FROM sales WHERE date >= ? AND date <= ?)',
+    [from, to]
+  );
+
+  const itemsBySale = new Map<string, SaleItem[]>();
+  itemRows.forEach(row => {
+    const items = itemsBySale.get(row.sale_id) ?? [];
+    items.push({
+      menuItemId: row.menu_item_id ?? undefined,
+      name: row.name,
+      qty: Number(row.qty),
+      unitPrice: Number(row.unit_price),
+      addons: row.addons ? JSON.parse(row.addons) : undefined,
+    });
+    itemsBySale.set(row.sale_id, items);
+  });
+
+  return salesRows.map(row => ({
+    id: row.id,
+    orderCode: row.order_code ?? undefined,
+    date: row.date,
+    time: row.time,
+    items: itemsBySale.get(row.id) ?? [],
+    subtotal: Number(row.subtotal ?? 0),
+    discount: Number(row.discount ?? 0),
+    taxRateApplied: Number(row.tax_rate ?? 0),
+    taxAmount: Number(row.tax_amount ?? 0),
+    amount: Number(row.total_amount ?? row.amount),
+    paymentMethod: row.payment_method as Sale['paymentMethod'],
+    cashAmount: row.cash_amount == null ? undefined : Number(row.cash_amount),
+    upiAmount: row.upi_amount == null ? undefined : Number(row.upi_amount),
+    channel: (row.channel ?? undefined) as any,
+    note: row.note ?? undefined,
+    createdAt: row.created_at,
+    extraCharges: row.extra_charges ? JSON.parse(row.extra_charges) : undefined,
+  }));
+}
+
+export async function dbGetSalesSumForDate(date: string): Promise<number> {
+  if (!isTauri()) return 0;
+  await ensureSqlite();
+  if (!sqlite) return 0;
+
+  const rows = await sqlite.select<{ total: number | null }>(
+    `SELECT SUM(total_amount) as total FROM sales WHERE date = ? AND payment_method != 'Cancelled'`,
+    [date]
+  );
+  return rows[0]?.total ?? 0;
+}
+
+
 export async function dbSaveSales(sales: Sale[]): Promise<void> {
   if (!isTauri()) throw new Error('SQLite persistence requires Tauri runtime');
 
@@ -522,6 +635,79 @@ export async function dbGetOrders(): Promise<Order[]> {
     kot_printed_qty?: number | null;
     addons: string | null;
   }>('SELECT * FROM order_items');
+
+  const itemsByOrder = new Map<string, OrderItem[]>();
+  itemRows.forEach(row => {
+    const items = itemsByOrder.get(row.order_id) ?? [];
+    items.push({
+      menuItemId: row.menu_item_id ?? undefined,
+      name: row.name,
+      qty: Number(row.qty),
+      unitPrice: Number(row.unit_price),
+      countsInSales: Number(row.counts_in_sales) !== 0,
+      kotPrintedQty: row.kot_printed_qty == null ? undefined : Number(row.kot_printed_qty),
+      addons: row.addons ? JSON.parse(row.addons) : undefined,
+    });
+    itemsByOrder.set(row.order_id, items);
+  });
+
+  return orderRows.map(row => ({
+    id: row.id,
+    code: row.code,
+    type: row.order_type as Order['type'],
+    customerName: row.customer_name ?? undefined,
+    items: itemsByOrder.get(row.id) ?? [],
+    status: row.status as Order['status'],
+    paymentMethod: row.payment_method ? (row.payment_method as Order['paymentMethod']) : undefined,
+    cashAmount: row.cash_amount == null ? undefined : Number(row.cash_amount),
+    upiAmount: row.upi_amount == null ? undefined : Number(row.upi_amount),
+    discount: row.discount == null ? undefined : Number(row.discount),
+    note: row.note ?? undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    completedAt: row.completed_at ?? undefined,
+    extraCharges: row.extra_charges ? JSON.parse(row.extra_charges) : undefined,
+  }));
+}
+
+export async function dbGetActiveOrders(): Promise<Order[]> {
+  if (!isTauri()) return [];
+  await ensureSqlite();
+  if (!sqlite) return [];
+
+  const orderRows = await sqlite.select<{
+    id: string;
+    code: string;
+    order_type: string;
+    customer_name: string | null;
+    status: string;
+    amount: number;
+    discount?: number | null;
+    payment_method: string | null;
+    cash_amount: number | null;
+    upi_amount: number | null;
+    note: string | null;
+    created_at: string;
+    updated_at: string;
+    completed_at: string | null;
+    extra_charges?: string | null;
+  }>(
+    "SELECT * FROM orders WHERE status = 'Open' ORDER BY updated_at DESC, created_at DESC"
+  );
+
+  const itemRows = await sqlite.select<{
+    id: string;
+    order_id: string;
+    menu_item_id: string | null;
+    name: string;
+    qty: number;
+    unit_price: number;
+    counts_in_sales: number;
+    kot_printed_qty?: number | null;
+    addons: string | null;
+  }>(
+    "SELECT * FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE status = 'Open')"
+  );
 
   const itemsByOrder = new Map<string, OrderItem[]>();
   itemRows.forEach(row => {
@@ -734,4 +920,347 @@ export async function dbSaveMenuCategories(categories: string[]): Promise<void> 
       [name, index, now]
     );
   }
+}
+
+// ── Targeted single-entity writes ──────────────────────
+// These operate on one row at a time inside a transaction.
+// Use these for all mutations after initial load to avoid
+// full-table reads/writes.
+
+// ── Orders ─────────────────────────────────────────────
+
+export async function dbInsertOrder(order: Order): Promise<void> {
+  if (!isTauri()) throw new Error('SQLite persistence requires Tauri runtime');
+  await ensureSqlite();
+
+  const subtotal = order.items.reduce((sum, item) => {
+    const addonTotal = (item.addons ?? []).reduce((s, a) => s + (a.qty ?? 1) * a.price, 0);
+    return sum + item.qty * item.unitPrice + addonTotal;
+  }, 0);
+  const chargesSum = (order.extraCharges ?? []).reduce((s, c) => s + c.amount, 0);
+  const totalAmount = Math.max(0, subtotal + chargesSum - (order.discount ?? 0));
+
+  const stmts: SqlStatement[] = [
+    {
+      sql: `INSERT INTO orders
+        (id, code, order_type, customer_name, status, amount, discount, payment_method, cash_amount, upi_amount, note, created_at, updated_at, completed_at, extra_charges)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      values: [
+        order.id, order.code, order.type, order.customerName ?? null,
+        order.status, totalAmount, order.discount ?? 0,
+        order.paymentMethod ?? null, order.cashAmount ?? null, order.upiAmount ?? null,
+        order.note ?? null, order.createdAt, order.updatedAt,
+        order.completedAt ?? null,
+        order.extraCharges ? JSON.stringify(order.extraCharges) : null,
+      ],
+    },
+  ];
+
+  for (let i = 0; i < order.items.length; i++) {
+    const item = order.items[i];
+    stmts.push({
+      sql: `INSERT INTO order_items (id, order_id, menu_item_id, name, qty, unit_price, counts_in_sales, kot_printed_qty, addons)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      values: [`${order.id}:${i}`, order.id, item.menuItemId ?? null, item.name, item.qty,
+               item.unitPrice, item.countsInSales ? 1 : 0, item.kotPrintedQty ?? 0,
+               item.addons ? JSON.stringify(item.addons) : null],
+    });
+  }
+
+  await dbExecuteBatch(stmts);
+}
+
+export async function dbUpdateOrder(id: string, order: Order): Promise<void> {
+  if (!isTauri()) throw new Error('SQLite persistence requires Tauri runtime');
+  await ensureSqlite();
+
+  const subtotal = order.items.reduce((sum, item) => {
+    const addonTotal = (item.addons ?? []).reduce((s, a) => s + (a.qty ?? 1) * a.price, 0);
+    return sum + item.qty * item.unitPrice + addonTotal;
+  }, 0);
+  const chargesSum = (order.extraCharges ?? []).reduce((s, c) => s + c.amount, 0);
+  const totalAmount = Math.max(0, subtotal + chargesSum - (order.discount ?? 0));
+
+  const stmts: SqlStatement[] = [
+    {
+      sql: `UPDATE orders SET
+        order_type=?, customer_name=?, status=?, amount=?, discount=?,
+        payment_method=?, cash_amount=?, upi_amount=?, note=?,
+        updated_at=?, completed_at=?, extra_charges=?
+       WHERE id=?`,
+      values: [
+        order.type, order.customerName ?? null, order.status, totalAmount, order.discount ?? 0,
+        order.paymentMethod ?? null, order.cashAmount ?? null, order.upiAmount ?? null,
+        order.note ?? null, order.updatedAt, order.completedAt ?? null,
+        order.extraCharges ? JSON.stringify(order.extraCharges) : null,
+        id,
+      ],
+    },
+  ];
+
+  const itemIds: string[] = [];
+  for (let i = 0; i < order.items.length; i++) {
+    const item = order.items[i];
+    const itemId = `${id}:${i}`;
+    itemIds.push(itemId);
+    stmts.push({
+      sql: `INSERT OR REPLACE INTO order_items (id, order_id, menu_item_id, name, qty, unit_price, counts_in_sales, kot_printed_qty, addons)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      values: [itemId, id, item.menuItemId ?? null, item.name, item.qty,
+               item.unitPrice, item.countsInSales ? 1 : 0, item.kotPrintedQty ?? 0,
+               item.addons ? JSON.stringify(item.addons) : null],
+    });
+  }
+
+  if (itemIds.length > 0) {
+    const ph = itemIds.map(() => '?').join(', ');
+    stmts.push({
+      sql: `DELETE FROM order_items WHERE order_id=? AND id NOT IN (${ph})`,
+      values: [id, ...itemIds],
+    });
+  } else {
+    stmts.push({ sql: 'DELETE FROM order_items WHERE order_id=?', values: [id] });
+  }
+
+  await dbExecuteBatch(stmts);
+}
+
+export async function dbDeleteOrder(id: string): Promise<void> {
+  if (!isTauri()) throw new Error('SQLite persistence requires Tauri runtime');
+  await ensureSqlite();
+
+  await dbExecuteBatch([
+    { sql: 'DELETE FROM order_items WHERE order_id=?', values: [id] },
+    { sql: 'DELETE FROM orders WHERE id=?', values: [id] },
+  ]);
+}
+
+/**
+ * Atomically marks an order as Completed AND inserts the corresponding sale.
+ * Both writes happen inside a single Rust-managed transaction.
+ */
+export async function dbCompleteOrderAndAddSale(order: Order, sale: Sale): Promise<void> {
+  if (!isTauri()) throw new Error('SQLite persistence requires Tauri runtime');
+  await ensureSqlite();
+
+  const orderSubtotal = order.items.reduce((sum, item) => {
+    const addonTotal = (item.addons ?? []).reduce((s, a) => s + (a.qty ?? 1) * a.price, 0);
+    return sum + item.qty * item.unitPrice + addonTotal;
+  }, 0);
+  const chargesSum = (order.extraCharges ?? []).reduce((s, c) => s + c.amount, 0);
+  const orderTotal = Math.max(0, orderSubtotal + chargesSum - (order.discount ?? 0));
+
+  const saleSubtotal = sale.subtotal ?? sale.items.reduce((s, it) => s + it.qty * it.unitPrice, 0);
+  const saleDiscount = sale.discount ?? 0;
+  const discountedSubtotal = Math.max(0, saleSubtotal - saleDiscount);
+  const taxRate = sale.taxRateApplied ?? 0;
+  const taxAmount = sale.taxAmount ?? +(discountedSubtotal * (taxRate / 100));
+  const saleTotal = sale.amount ?? +(discountedSubtotal + taxAmount);
+
+  const stmts: SqlStatement[] = [
+    // 1. Complete the order
+    {
+      sql: `UPDATE orders SET
+        order_type=?, customer_name=?, status=?, amount=?, discount=?,
+        payment_method=?, cash_amount=?, upi_amount=?, note=?,
+        updated_at=?, completed_at=?, extra_charges=?
+       WHERE id=?`,
+      values: [
+        order.type, order.customerName ?? null, order.status, orderTotal, order.discount ?? 0,
+        order.paymentMethod ?? null, order.cashAmount ?? null, order.upiAmount ?? null,
+        order.note ?? null, order.updatedAt, order.completedAt ?? null,
+        order.extraCharges ? JSON.stringify(order.extraCharges) : null,
+        order.id,
+      ],
+    },
+    // 2. Insert the sale record
+    {
+      sql: `INSERT INTO sales
+        (id, order_code, date, time, subtotal, discount, tax_rate, tax_amount, total_amount, amount, payment_method, cash_amount, upi_amount, channel, note, created_at, extra_charges)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      values: [
+        sale.id, sale.orderCode ?? null, sale.date, sale.time,
+        saleSubtotal, saleDiscount, taxRate, taxAmount, saleTotal, saleTotal,
+        sale.paymentMethod, sale.cashAmount ?? null, sale.upiAmount ?? null,
+        sale.channel ?? 'Takeaway', sale.note ?? null, sale.createdAt,
+        sale.extraCharges ? JSON.stringify(sale.extraCharges) : null,
+      ],
+    },
+  ];
+
+  // 3. Insert each sale_item
+  for (let i = 0; i < sale.items.length; i++) {
+    const item = sale.items[i];
+    stmts.push({
+      sql: `INSERT INTO sale_items (id, sale_id, menu_item_id, name, qty, unit_price, addons)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      values: [`${sale.id}:${i}`, sale.id, item.menuItemId ?? null, item.name, item.qty, item.unitPrice,
+               item.addons ? JSON.stringify(item.addons) : null],
+    });
+  }
+
+  await dbExecuteBatch(stmts);
+}
+
+// ── Sales ───────────────────────────────────────────────
+
+export async function dbInsertSale(sale: Sale): Promise<void> {
+  if (!isTauri()) throw new Error('SQLite persistence requires Tauri runtime');
+  await ensureSqlite();
+
+  const subtotal = sale.subtotal ?? sale.items.reduce((s, it) => s + it.qty * it.unitPrice, 0);
+  const discount = sale.discount ?? 0;
+  const discountedSubtotal = Math.max(0, subtotal - discount);
+  const taxRate = sale.taxRateApplied ?? 0;
+  const taxAmount = sale.taxAmount ?? +(discountedSubtotal * (taxRate / 100));
+  const totalAmount = sale.amount ?? +(discountedSubtotal + taxAmount);
+
+  const stmts: SqlStatement[] = [
+    {
+      sql: `INSERT INTO sales
+        (id, order_code, date, time, subtotal, discount, tax_rate, tax_amount, total_amount, amount, payment_method, cash_amount, upi_amount, channel, note, created_at, extra_charges)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      values: [
+        sale.id, sale.orderCode ?? null, sale.date, sale.time,
+        subtotal, discount, taxRate, taxAmount, totalAmount, totalAmount,
+        sale.paymentMethod, sale.cashAmount ?? null, sale.upiAmount ?? null,
+        sale.channel ?? 'Takeaway', sale.note ?? null, sale.createdAt,
+        sale.extraCharges ? JSON.stringify(sale.extraCharges) : null,
+      ],
+    },
+  ];
+
+  for (let i = 0; i < sale.items.length; i++) {
+    const item = sale.items[i];
+    stmts.push({
+      sql: `INSERT INTO sale_items (id, sale_id, menu_item_id, name, qty, unit_price, addons)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      values: [`${sale.id}:${i}`, sale.id, item.menuItemId ?? null, item.name, item.qty, item.unitPrice,
+               item.addons ? JSON.stringify(item.addons) : null],
+    });
+  }
+
+  await dbExecuteBatch(stmts);
+}
+
+export async function dbUpdateSale(id: string, sale: Sale): Promise<void> {
+  if (!isTauri()) throw new Error('SQLite persistence requires Tauri runtime');
+  await ensureSqlite();
+
+  const subtotal = sale.subtotal ?? sale.items.reduce((s, it) => s + it.qty * it.unitPrice, 0);
+  const discount = sale.discount ?? 0;
+  const discountedSubtotal = Math.max(0, subtotal - discount);
+  const taxRate = sale.taxRateApplied ?? 0;
+  const taxAmount = sale.taxAmount ?? +(discountedSubtotal * (taxRate / 100));
+  const totalAmount = sale.amount ?? +(discountedSubtotal + taxAmount);
+
+  const stmts: SqlStatement[] = [
+    {
+      sql: `UPDATE sales SET
+        order_code=?, date=?, time=?, subtotal=?, discount=?, tax_rate=?,
+        tax_amount=?, total_amount=?, amount=?, payment_method=?,
+        cash_amount=?, upi_amount=?, channel=?, note=?, extra_charges=?
+       WHERE id=?`,
+      values: [
+        sale.orderCode ?? null, sale.date, sale.time,
+        subtotal, discount, taxRate, taxAmount, totalAmount, totalAmount,
+        sale.paymentMethod, sale.cashAmount ?? null, sale.upiAmount ?? null,
+        sale.channel ?? 'Takeaway', sale.note ?? null,
+        sale.extraCharges ? JSON.stringify(sale.extraCharges) : null,
+        id,
+      ],
+    },
+  ];
+
+  const itemIds: string[] = [];
+  for (let i = 0; i < sale.items.length; i++) {
+    const item = sale.items[i];
+    const itemId = `${id}:${i}`;
+    itemIds.push(itemId);
+    stmts.push({
+      sql: `INSERT OR REPLACE INTO sale_items (id, sale_id, menu_item_id, name, qty, unit_price, addons)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      values: [itemId, id, item.menuItemId ?? null, item.name, item.qty, item.unitPrice,
+               item.addons ? JSON.stringify(item.addons) : null],
+    });
+  }
+
+  if (itemIds.length > 0) {
+    const ph = itemIds.map(() => '?').join(', ');
+    stmts.push({ sql: `DELETE FROM sale_items WHERE sale_id=? AND id NOT IN (${ph})`, values: [id, ...itemIds] });
+  } else {
+    stmts.push({ sql: 'DELETE FROM sale_items WHERE sale_id=?', values: [id] });
+  }
+
+  await dbExecuteBatch(stmts);
+}
+
+export async function dbDeleteSale(id: string): Promise<void> {
+  if (!isTauri()) throw new Error('SQLite persistence requires Tauri runtime');
+  await ensureSqlite();
+
+  await dbExecuteBatch([
+    { sql: 'DELETE FROM sale_items WHERE sale_id=?', values: [id] },
+    { sql: 'DELETE FROM sales WHERE id=?', values: [id] },
+  ]);
+}
+
+// ── Menu Items ──────────────────────────────────────────
+
+export async function dbInsertMenuItem(item: MenuItem): Promise<void> {
+  if (!isTauri()) throw new Error('SQLite persistence requires Tauri runtime');
+  await ensureSqlite();
+
+  await dbExecuteSingle(
+    `INSERT INTO menu_items (id, name, localized_name_hi, price, category, description, image, is_non_profit, is_active, addons, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      item.id, item.name, item.localizedNameHi ?? null, item.price, item.category,
+      item.description ?? null, item.image ?? null, item.isNonProfit ? 1 : 0,
+      item.isActive ? 1 : 0, item.addons ? JSON.stringify(item.addons) : null,
+      item.createdAt,
+    ]
+  );
+}
+
+export async function dbUpdateMenuItem(id: string, item: MenuItem): Promise<void> {
+  if (!isTauri()) throw new Error('SQLite persistence requires Tauri runtime');
+  await ensureSqlite();
+
+  await dbExecuteSingle(
+    `UPDATE menu_items SET
+      name=?, localized_name_hi=?, price=?, category=?, description=?,
+      image=?, is_non_profit=?, is_active=?, addons=?
+     WHERE id=?`,
+    [
+      item.name, item.localizedNameHi ?? null, item.price, item.category,
+      item.description ?? null, item.image ?? null, item.isNonProfit ? 1 : 0,
+      item.isActive ? 1 : 0, item.addons ? JSON.stringify(item.addons) : null,
+      id,
+    ]
+  );
+}
+
+export async function dbDeleteMenuItem(id: string): Promise<void> {
+  if (!isTauri()) throw new Error('SQLite persistence requires Tauri runtime');
+  await ensureSqlite();
+
+  await dbExecuteSingle('DELETE FROM menu_items WHERE id=?', [id]);
+}
+
+export async function dbUpsertMenuCategory(name: string, sortOrder: number): Promise<void> {
+  if (!isTauri()) throw new Error('SQLite persistence requires Tauri runtime');
+  await ensureSqlite();
+
+  await dbExecuteSingle(
+    'INSERT OR REPLACE INTO menu_categories (name, sort_order, created_at) VALUES (?, ?, ?)',
+    [name, sortOrder, new Date().toISOString()]
+  );
+}
+
+export async function dbDeleteMenuCategory(name: string): Promise<void> {
+  if (!isTauri()) throw new Error('SQLite persistence requires Tauri runtime');
+  await ensureSqlite();
+
+  await dbExecuteSingle('DELETE FROM menu_categories WHERE name=?', [name]);
 }

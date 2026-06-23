@@ -4,7 +4,6 @@ import { useMenuStore } from '../../store/menuStore';
 import { useOrderStore } from '../../store/orderStore';
 import { formatCurrency } from '../../utils/currencyUtils';
 import { showToast } from '../shared/Toast';
-import { addOrder as createOrder, updateOrder } from '../../services/orderService';
 import Icon from '../shared/Icon';
 import { useAsyncAction } from '../../hooks/useAsyncAction';
 
@@ -27,7 +26,6 @@ function orderTotal(items: OrderItem[]): number {
 
 export default function AddOrderForm({ onClose, order, onSaved }: Props) {
   const { items: menuItems, categories: menuCategories } = useMenuStore();
-  const { load } = useOrderStore();
   const isEditing = Boolean(order);
 
   const [orderType, setOrderType] = useState<OrderType>('Dine');
@@ -182,7 +180,8 @@ export default function AddOrderForm({ onClose, order, onSaved }: Props) {
       return;
     }
     if (order) {
-      await updateOrder(order.id, {
+      // Await so we only close/toast on success
+      await useOrderStore.getState().update(order.id, {
         type: orderType,
         customerName: customerName.trim() || undefined,
         items,
@@ -196,7 +195,8 @@ export default function AddOrderForm({ onClose, order, onSaved }: Props) {
         extraCharges: extraCharges.length > 0 ? extraCharges : undefined,
       });
     } else {
-      await createOrder({
+      // Await so we only close/toast on success
+      await useOrderStore.getState().add({
         type: orderType,
         customerName: customerName.trim() || undefined,
         items,
@@ -207,12 +207,11 @@ export default function AddOrderForm({ onClose, order, onSaved }: Props) {
         extraCharges: extraCharges.length > 0 ? extraCharges : undefined,
       });
     }
-    await load();
     showToast(order ? 'Order updated' : 'Order created', 'success');
     if (!order) resetForm();
     onSaved?.();
     onClose();
-  }, [order, orderType, customerName, items, discount, note, extraCharges, load, onSaved, onClose]);
+  }, [order, orderType, customerName, items, discount, note, extraCharges, onSaved, onClose]);
 
   const [handleSubmit, isSaving] = useAsyncAction(submitAsync);
 

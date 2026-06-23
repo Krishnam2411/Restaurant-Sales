@@ -3,7 +3,7 @@ import { formatCurrency } from '../../utils/currencyUtils';
 
 interface DashboardTabProps {
   todaySales: Sale[];
-  yesterdaySales: Sale[];
+  yesterdaySalesSum: number;
   topDishNames: string[];
   recentSales: Sale[];
   onViewLedger: () => void;
@@ -11,7 +11,7 @@ interface DashboardTabProps {
 
 export default function DashboardTab({
   todaySales,
-  yesterdaySales,
+  yesterdaySalesSum,
   topDishNames,
   recentSales,
   onViewLedger,
@@ -25,7 +25,7 @@ export default function DashboardTab({
         </div>
         <div className="kpi-card soft">
           <div className="kpi-label">Yesterday's Sales</div>
-          <div className="kpi-value">{yesterdaySales.length ? formatCurrency(yesterdaySales.reduce((sum, sale) => sum + sale.amount, 0)) : '-'}</div>
+          <div className="kpi-value">{yesterdaySalesSum > 0 ? formatCurrency(yesterdaySalesSum) : '-'}</div>
         </div>
         <div className="kpi-card accent">
           <div className="kpi-label">Most Sold Dishes</div>

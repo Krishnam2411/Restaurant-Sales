@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect, useRef } from 'react';
 import type { MouseEvent } from 'react';
 import type { PaymentMethod, Sale } from '../../types';
 import { formatCurrency } from '../../utils/currencyUtils';
+import { shortRef } from '../../utils/uuid';
 import type { LedgerDatePreset, LedgerEditState, LedgerField, LedgerMenuState } from './appTypes';
 import Icon from '../shared/Icon';
 
@@ -19,12 +20,12 @@ interface LedgerTabProps {
   onExportPdf: (rows: Sale[]) => void;
   onStartLedgerEdit: (sale: Sale, field: LedgerField) => void;
   onLedgerEditChange: (value: LedgerEditState) => void;
-  onSaveLedgerEdit: () => Promise<void>;
+  onSaveLedgerEdit: () => void | Promise<void>;
   onCancelLedgerEdit: () => void;
   onOpenLedgerMenu: (event: MouseEvent<HTMLElement>, saleId: string | null) => void;
   onCloseLedgerMenu: () => void;
-  onInsertLedgerRow: (anchorSale: Sale | null, direction: 'above' | 'below' | 'append', fallbackDate?: string) => Promise<void>;
-  onDeleteLedgerRow: (saleId: string) => Promise<void>;
+  onInsertLedgerRow: (anchorSale: Sale | null, direction: 'above' | 'below' | 'append', fallbackDate?: string) => void | Promise<void>;
+  onDeleteLedgerRow: (saleId: string) => void | Promise<void>;
 }
 
 export default function LedgerTab({
@@ -346,7 +347,7 @@ export default function LedgerTab({
                   <td className="ledger-cell" title={sale.date}>
                     {sale.orderCode
                       ? <span>{sale.orderCode}</span>
-                      : <span>#{sale.id.slice(-5).toUpperCase()}</span>
+                      : <span>#{shortRef(sale.id)}</span>
                     }
                   </td>
                   <td

@@ -1,8 +1,6 @@
 import { APP_CONFIG } from "../config/appConfig";
-import type { MenuItem, Order, OrderItem, Sale, ExtraCharge } from "../types";
+import type { ExtraCharge } from "../types";
 import { formatCurrency } from "../utils/currencyUtils";
-import { updateOrder as updateOrderService } from "./orderService";
-import { getPrinterSettings, printReceipt } from "./printerService";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -18,12 +16,6 @@ export type PrintableLine = {
 };
 
 export type PrintableDocumentKind = "bill" | "kot";
-
-type PrintableOrder = Pick<Order, "code" | "discount" | "note" | "items" | "extraCharges">;
-type PrintableSale = Pick<
-  Sale,
-  "orderCode" | "discount" | "note" | "items" | "amount" | "extraCharges"
->;
 
 export interface PrintableDocument {
   kind: PrintableDocumentKind;
@@ -44,19 +36,9 @@ export interface PrintableDocument {
   extraCharges?: ExtraCharge[];
 }
 
-export interface PrintAdapter {
-  print(document: PrintableDocument): Promise<void>;
-}
-
-
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function getMenuMap(menuItems: MenuItem[]): Map<string, MenuItem> {
-  return new Map(menuItems.map((item) => [item.id, item]));
-}
 
 function escapeHtml(value: string | undefined | null): string {
   if (!value) return "";
@@ -602,187 +584,3 @@ export function buildKotHtml(
 </html>`;
 }
 
-
-
-// ---------------------------------------------------------------------------
-// Tauri Printer Adapter
-// ---------------------------------------------------------------------------
-
-class TauriPrinterAdapter implements PrintAdapter {
-  async print(document: PrintableDocument): Promise<void> {
-    const settings = await getPrinterSettings();
-    const html =
-      document.kind === "kot"
-        ? buildKotHtml(document)
-        : buildBillHtml(document);
-
-    await printReceipt(html, settings.printerName);
-  }
-}
-
-const activePrinter: PrintAdapter = new TauriPrinterAdapter();
-
-// ---------------------------------------------------------------------------
-// Internal helpers (UNCHANGED)
-// ---------------------------------------------------------------------------
-
-function sumItems(items: OrderItem[]): number {
-  return items.reduce((sum, item) => {
-    const addonTotal = (item.addons ?? []).reduce((s, a) => s + (a.qty ?? 1) * a.price, 0);
-    return sum + item.qty * item.unitPrice + addonTotal;
-  }, 0);
-}
-
-function buildLines(
-  items: OrderItem[],
-  menuItems: MenuItem[],
-): PrintableLine[] {
-  const menuById = getMenuMap(menuItems);
-  return items.map((item) => {
-    const menuItem = item.menuItemId
-      ? menuById.get(item.menuItemId)
-      : undefined;
-    const sourceName = menuItem?.name ?? item.name;
-    const addonTotal = (item.addons ?? []).reduce((s, a) => s + (a.qty ?? 1) * a.price, 0);
-    return {
-      name: sourceName,
-      hindiName: menuItem?.localizedNameHi?.trim() || sourceName,
-      qty: item.qty,
-      unitPrice: item.unitPrice,
-      lineTotal: item.qty * item.unitPrice + addonTotal,
-      addons: (item.addons ?? []).map(a => ({
-        name: a.qty && a.qty > 1 ? `${a.name} ×${a.qty}` : a.name,
-        hindiName: a.localizedNameHi
-          ? (a.qty && a.qty > 1 ? `${a.localizedNameHi} ×${a.qty}` : a.localizedNameHi)
-          : (a.qty && a.qty > 1 ? `${a.name} ×${a.qty}` : a.name),
-        price: (a.qty ?? 1) * a.price,
-      })),
-    };
-  });
-}
-
-function buildBillDocument(
-  source: PrintableOrder | PrintableSale,
-  menuItems: MenuItem[],
-  orderId: string,
-  total: number,
-): PrintableDocument {
-  const items = source.items;
-  const discount = source.discount ?? 0;
-  return {
-    kind: "bill",
-    title: `${APP_CONFIG.restaurantName} - Bill`,
-    orderId,
-    contactNumber: APP_CONFIG.contactNumber || undefined,
-    lines: buildLines(items as OrderItem[], menuItems),
-    discount,
-    total,
-    note: source.note,
-    generatedAt: new Date().toLocaleString("en-IN"),
-    logoUrl: "/outlined-logo.png",
-    extraCharges: source.extraCharges,
-  };
-}
-
-function buildKotDocument(
-  order: PrintableOrder,
-  menuItems: MenuItem[],
-): PrintableDocument {
-  const menuById = getMenuMap(menuItems);
-  const lines: PrintableLine[] = [];
-  for (const item of order.items) {
-    const printed = (item as any).kotPrintedQty ?? 0;
-    const remaining = Math.max(0, item.qty - printed);
-    if (remaining <= 0) continue;
-    const menuItem = item.menuItemId
-      ? menuById.get(item.menuItemId)
-      : undefined;
-    const sourceName = menuItem?.name ?? item.name;
-    lines.push({
-      name: sourceName,
-      hindiName: menuItem?.localizedNameHi?.trim() || sourceName,
-      qty: remaining,
-      unitPrice: item.unitPrice,
-      lineTotal: item.qty * item.unitPrice,
-      addons: (item.addons ?? []).map(a => ({
-        name: a.qty && a.qty > 1 ? `${a.name} ×${a.qty}` : a.name,
-        hindiName: a.localizedNameHi
-          ? (a.qty && a.qty > 1 ? `${a.localizedNameHi} ×${a.qty}` : a.localizedNameHi)
-          : (a.qty && a.qty > 1 ? `${a.name} ×${a.qty}` : a.name),
-        price: (a.qty ?? 1) * a.price,
-      })),
-    });
-  }
-
-  return {
-    kind: "kot",
-    title: `${APP_CONFIG.restaurantName} - KOT`,
-    orderId: order.code,
-    lines,
-    discount: 0,
-    total: 0,
-    note: order.note,
-    generatedAt: new Date().toLocaleString("en-IN"),
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Public print functions (UNCHANGED signatures)
-// ---------------------------------------------------------------------------
-
-export async function printOrderBill(
-  order: Order,
-  menuItems: MenuItem[],
-): Promise<void> {
-  const subtotal = sumItems(order.items);
-  const chargesSum = (order.extraCharges ?? []).reduce((s, c) => s + c.amount, 0);
-  const total = Math.max(0, subtotal + chargesSum - (order.discount ?? 0));
-  const doc = buildBillDocument(order, menuItems, order.code, total);
-  doc.logoUrl = await getLogoDataUri();
-  await activePrinter.print(doc);
-}
-
-export async function printOrderKot(
-  order: Order,
-  menuItems: MenuItem[],
-): Promise<void> {
-  const doc = buildKotDocument(order, menuItems);
-  if (!doc.lines || doc.lines.length === 0) {
-    throw new Error("No new KOT items to print");
-  }
-
-  await activePrinter.print(doc);
-
-  // After successful print, mark printed quantities on order items
-  const updatedItems = order.items.map((item) => {
-    const printed = item.kotPrintedQty ?? 0;
-    const remaining = Math.max(0, item.qty - printed);
-    const newPrinted = printed + remaining;
-    return { ...item, kotPrintedQty: newPrinted };
-  });
-
-  try {
-    await updateOrderService(order.id, { items: updatedItems });
-  } catch (err) {
-    // Non-fatal: printing succeeded but updating DB failed.
-    console.warn("Failed to update order after KOT print", err);
-    throw err instanceof Error
-      ? err
-      : new Error("Failed to update printed KOT status");
-  }
-}
-
-export async function printSaleBill(
-  sale: Sale,
-  menuItems: MenuItem[],
-): Promise<void> {
-  const subtotal = sumItems(sale.items as OrderItem[]);
-  const chargesSum = (sale.extraCharges ?? []).reduce((s, c) => s + c.amount, 0);
-  const total =
-    sale.amount ??
-    Math.max(0, subtotal + chargesSum - (sale.discount ?? 0));
-  const orderId = sale.orderCode ?? sale.id;
-  const doc = buildBillDocument(sale as PrintableSale, menuItems, orderId, total);
-  doc.logoUrl = await getLogoDataUri();
-  await activePrinter.print(doc);
-}
