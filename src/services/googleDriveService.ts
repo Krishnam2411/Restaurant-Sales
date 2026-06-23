@@ -2,7 +2,7 @@ import { getSetting, setSetting } from './db';
 
 // Placeholder for Google Client ID.
 // The user can create a Desktop Application credentials project on Google Cloud Console and paste the Client ID here.
-export const GOOGLE_CLIENT_ID = 'YOUR_GOOGLE_CLIENT_ID_PLACEHOLDER.apps.googleusercontent.com';
+export const GOOGLE_CLIENT_ID = '235535166115-t2gf5dviv0r9j10redj2if4nvplqd052.apps.googleusercontent.com.apps.googleusercontent.com';
 
 const REDIRECT_URI = 'http://127.0.0.1:18524';
 const AUTH_URL = 'https://accounts.google.com/o/oauth2/auth';
